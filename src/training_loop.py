@@ -321,7 +321,7 @@ def final_evaluate(model, test_loader, criterion, device, stage_name, num_classe
 
     # Perform validation
     test_loss, test_iou, test_f1, test_pq, f1_per_class = validate(
-        model, test_loader, criterion, device, num_classes, post_process=True
+        model, test_loader, criterion, device, num_classes, post_process=False
     )
 
     # Print results
