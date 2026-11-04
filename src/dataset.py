@@ -4,45 +4,22 @@ import torch
 from torch.utils.data import Dataset
 
 
-def _split_has_tiles(split_dir):
-    """True when split_dir holds sample folders that contain image.npy."""
-    try:
-        names = os.listdir(split_dir)
-    except OSError:
-        return False
-    for name in names:
-        sample = os.path.join(split_dir, name)
-        if os.path.isdir(sample) and os.path.isfile(os.path.join(sample, "image.npy")):
-            return True
-    return False
-
-
 def resolve_dataset_path(data_path, dataset):
-    """Directory that contains train/val/test tile folders.
+    """Directory that contains train/val/test.
 
-    ``data_path`` may be the parent of the named dataset
-    (``../data`` with ``MoNuSeg_37/train``) or the dataset directory
-    itself (``/kaggle/input/MoNuSeg_37`` with ``train`` inside it).
+    Prefer ``data_path/dataset/train`` (``.../MoNuSeg/MoNuSeg/train`` when
+    ``data_path`` already ends in the dataset name). If that folder is
+    absent, use ``data_path/train``.
     """
     nested = os.path.join(data_path, dataset)
-    raw_hit = None
-    for root in (nested, data_path):
-        train = os.path.join(root, "train")
-        if not os.path.isdir(train):
-            continue
-        if _split_has_tiles(train):
-            return root
-        if os.path.isdir(os.path.join(train, "img")):
-            raw_hit = train
-    if raw_hit is not None:
-        raise FileNotFoundError(
-            f"{raw_hit} has img/labelcol images, not tiled samples. "
-            "Run prepare_monuseg.py or prepare_monuseg37.py so each split "
-            "contains sample folders with image.npy, mask.npy, h_map.npy, and v_map.npy."
-        )
+    nested_train = os.path.join(nested, "train")
+    if os.path.isdir(nested_train):
+        return nested
+    direct_train = os.path.join(data_path, "train")
+    if os.path.isdir(direct_train):
+        return data_path
     raise FileNotFoundError(
-        f"No tiled train split at {os.path.join(nested, 'train')} "
-        f"or {os.path.join(data_path, 'train')}."
+        f"No train split at {nested_train} or {direct_train}."
     )
 
 
