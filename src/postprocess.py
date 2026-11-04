@@ -202,7 +202,7 @@ if __name__ == "__main__":
     from config import Config
     from unet_hovergnn import GraphHoverNet
     from loss_function import HoverLoss
-    from dataset import SegmentationDataset, resolve_dataset_path
+    from dataset import SegmentationDataset
     from torchvision import transforms
     from torch.utils.data import DataLoader
     from visualization import visualize_hovernet_output
@@ -214,7 +214,7 @@ if __name__ == "__main__":
         transforms.Normalize(mean=[0.5]*3, std=[0.5]*3)  # example: scale to [-1, 1]
     ])
 
-    dataset_path = resolve_dataset_path(Config.DATA_PATH, Config.DATASET)
+    dataset_path = os.path.join(Config.DATA_PATH, Config.DATASET)
 
     train_dataset = SegmentationDataset(dataset_path, split="train", transform=transform)
     train_dataloader = DataLoader(train_dataset, batch_size=Config.BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)

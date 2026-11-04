@@ -3,26 +3,6 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-
-def resolve_dataset_path(data_path, dataset):
-    """Directory that contains train/val/test.
-
-    Prefer ``data_path/dataset/train`` (``.../MoNuSeg/MoNuSeg/train`` when
-    ``data_path`` already ends in the dataset name). If that folder is
-    absent, use ``data_path/train``.
-    """
-    nested = os.path.join(data_path, dataset)
-    nested_train = os.path.join(nested, "train")
-    if os.path.isdir(nested_train):
-        return nested
-    direct_train = os.path.join(data_path, "train")
-    if os.path.isdir(direct_train):
-        return data_path
-    raise FileNotFoundError(
-        f"No train split at {nested_train} or {direct_train}."
-    )
-
-
 class SegmentationDataset(Dataset):
     def __init__(self, root_dir, split='train', transform=None):
         """
@@ -78,7 +58,7 @@ if __name__ == "__main__":
         transforms.Normalize(mean=[0.5]*3, std=[0.5]*3)  # example: scale to [-1, 1]
     ])
 
-    dataset_path = resolve_dataset_path(Config.DATA_PATH, Config.DATASET)
+    dataset_path = os.path.join(Config.DATA_PATH, Config.DATASET)
 
     train_dataset = SegmentationDataset(dataset_path, split="train", transform=transform)
     val_dataset = SegmentationDataset(dataset_path, split="val", transform=transform)
