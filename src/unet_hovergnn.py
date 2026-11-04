@@ -35,14 +35,16 @@ class GraphBranch(nn.Module):
         self.convs = nn.ModuleList()
         self.norms = nn.ModuleList()
 
-        self.convs.append(GENConv(in_channels, hidden_channels, edge_dim=edge_dim))
+        # Each tile is its own graph. CoNSeP tiles can contain one nucleus, and
+        # GENConv's default BatchNorm cannot train on a single node.
+        self.convs.append(GENConv(in_channels, hidden_channels, edge_dim=edge_dim, norm="layer"))
         self.norms.append(LayerNorm(hidden_channels))
 
         for _ in range(num_layers - 2):
-            self.convs.append(GENConv(hidden_channels, hidden_channels, edge_dim=edge_dim))
+            self.convs.append(GENConv(hidden_channels, hidden_channels, edge_dim=edge_dim, norm="layer"))
             self.norms.append(LayerNorm(hidden_channels))
 
-        self.convs.append(GENConv(hidden_channels, hidden_channels, edge_dim=edge_dim))
+        self.convs.append(GENConv(hidden_channels, hidden_channels, edge_dim=edge_dim, norm="layer"))
         self.norms.append(LayerNorm(hidden_channels))
 
         self.classifier = nn.Sequential(
