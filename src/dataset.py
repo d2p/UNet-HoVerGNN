@@ -3,6 +3,49 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+
+def _split_has_tiles(split_dir):
+    """True when split_dir holds sample folders that contain image.npy."""
+    try:
+        names = os.listdir(split_dir)
+    except OSError:
+        return False
+    for name in names:
+        sample = os.path.join(split_dir, name)
+        if os.path.isdir(sample) and os.path.isfile(os.path.join(sample, "image.npy")):
+            return True
+    return False
+
+
+def resolve_dataset_path(data_path, dataset):
+    """Directory that contains train/val/test tile folders.
+
+    ``data_path`` may be the parent of the named dataset
+    (``../data`` with ``MoNuSeg_37/train``) or the dataset directory
+    itself (``/kaggle/input/MoNuSeg_37`` with ``train`` inside it).
+    """
+    nested = os.path.join(data_path, dataset)
+    raw_hit = None
+    for root in (nested, data_path):
+        train = os.path.join(root, "train")
+        if not os.path.isdir(train):
+            continue
+        if _split_has_tiles(train):
+            return root
+        if os.path.isdir(os.path.join(train, "img")):
+            raw_hit = train
+    if raw_hit is not None:
+        raise FileNotFoundError(
+            f"{raw_hit} has img/labelcol images, not tiled samples. "
+            "Run prepare_monuseg.py or prepare_monuseg37.py so each split "
+            "contains sample folders with image.npy, mask.npy, h_map.npy, and v_map.npy."
+        )
+    raise FileNotFoundError(
+        f"No tiled train split at {os.path.join(nested, 'train')} "
+        f"or {os.path.join(data_path, 'train')}."
+    )
+
+
 class SegmentationDataset(Dataset):
     def __init__(self, root_dir, split='train', transform=None):
         """
@@ -58,7 +101,7 @@ if __name__ == "__main__":
         transforms.Normalize(mean=[0.5]*3, std=[0.5]*3)  # example: scale to [-1, 1]
     ])
 
-    dataset_path = os.path.join(Config.DATA_PATH, Config.DATASET)
+    dataset_path = resolve_dataset_path(Config.DATA_PATH, Config.DATASET)
 
     train_dataset = SegmentationDataset(dataset_path, split="train", transform=transform)
     val_dataset = SegmentationDataset(dataset_path, split="val", transform=transform)

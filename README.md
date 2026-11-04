@@ -53,7 +53,7 @@ Install dependencies, then place datasets under a common root (default `../data`
 
 ### Classification datasets (Kaggle)
 
-Download [MoNuSAC / PanNuke / CoNSeP](https://www.kaggle.com/datasets/yangtunanh/monusac-pannuke-consep/data) and point `--data_path` at the folder that contains the dataset subdirectories.
+Download [MoNuSAC / PanNuke / CoNSeP](https://www.kaggle.com/datasets/yangtunanh/monusac-pannuke-consep/data) and point `--data_path` at the folder that contains the dataset subdirectories, or at the dataset directory itself when `train/`, `val/`, and `test/` are already inside it.
 
 
 | Dataset        | `--dataset`    | `--num_classes` |

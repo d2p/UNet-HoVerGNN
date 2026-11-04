@@ -5,7 +5,7 @@ from torchvision import transforms
 from torch.utils.data import DataLoader
 
 from config import Config
-from dataset import SegmentationDataset
+from dataset import SegmentationDataset, resolve_dataset_path
 from loss_function import HoverLoss
 from training_loop import train, final_evaluate
 from unet_hovergnn import GraphHoverNet
@@ -19,7 +19,8 @@ def parse_args():
     parser.add_argument("--num_classes", type=int, default=Config.NUM_CLASSES,
                         help="Class count including background. MoNuSeg/MoNuSeg_37: use 2")
     parser.add_argument("--data_path", type=str, default=Config.DATA_PATH,
-                        help="Path to dataset root directory")
+                        help="Parent of the dataset folder, or the dataset folder itself "
+                             "(the directory that contains train/val/test)")
     parser.add_argument("--output_path", type=str, default=Config.OUTPUT_PATH,
                         help="Path to save outputs (logs, checkpoints, metrics)")
     parser.add_argument("--epochs", type=int, default=Config.STAGE_EPOCH,
@@ -48,7 +49,7 @@ if __name__ == "__main__":
         transforms.Normalize(mean=[0.5] * 3, std=[0.5] * 3)
     ])
 
-    dataset_path = os.path.join(Config.DATA_PATH, Config.DATASET)
+    dataset_path = resolve_dataset_path(Config.DATA_PATH, Config.DATASET)
 
     # === Datasets and DataLoaders ===
     train_dataset = SegmentationDataset(dataset_path, split="train", transform=transform)
