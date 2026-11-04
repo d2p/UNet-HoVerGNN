@@ -2,7 +2,11 @@ import os
 import matplotlib.pyplot as plt
 from config import Config
 from datetime import datetime
-from postprocess import postprocess_hovernet_output
+from postprocess import (
+    apply_gnn_instance_labels,
+    centroids_from_instances,
+    postprocess_hovernet_output,
+)
 import torch
 
 def visualize_hovernet_output(pred_inst, filename=None):
@@ -44,24 +48,31 @@ def plot_validation_samples(model, dataloader, device, num_classes=6, num_sample
     os.makedirs(Config.OUTPUT_PATH, exist_ok=True)  # Ensure output directory exists
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    for image, mask, h_grads, v_grads in dataloader:
+    for image, mask, h_grads, v_grads, inst in dataloader:
         image = image.to(device, non_blocking=True)
         mask = mask.to(device, non_blocking=True).long()
         h_grads = h_grads.to(device, non_blocking=True)
         v_grads = v_grads.to(device, non_blocking=True)
+        del h_grads, v_grads, inst
 
         np_logits, hv_logits, nc_logits, _, _ = model(image)
         np_pred = torch.argmax(np_logits, dim=1)
         nc_pred = torch.argmax(nc_logits, dim=1)
 
-        postprocessed_pred = postprocess_hovernet_output(np_logits, hv_logits, nc_logits, device)
+        pred_inst, pred_type = postprocess_hovernet_output(
+            np_logits, hv_logits, nc_logits, device, nr_types=num_classes
+        )
+        if model.use_graph:
+            pred_coords, pred_ids = centroids_from_instances(pred_inst)
+            _, pred_logits = model.classify_nodes(image, pred_coords)
+            pred_type = apply_gnn_instance_labels(pred_inst, pred_ids, pred_logits, pred_type)
         
         B = image.size(0)
         for i in range(B):
             if samples_shown >= num_samples:
                 return
 
-            fig, axes = plt.subplots(1, 7, figsize=(21, 4))
+            fig, axes = plt.subplots(1, 8, figsize=(24, 4))
 
             # Input image
             axes[0].imshow(image[i].permute(1, 2, 0).cpu().numpy())
@@ -73,28 +84,33 @@ def plot_validation_samples(model, dataloader, device, num_classes=6, num_sample
             axes[1].set_title("Ground Truth")
             axes[1].axis('off')
 
-            # Predicted mask
+            # Raw NC argmax, before the watershed splits touching nuclei.
             axes[2].imshow(nc_pred[i].cpu().numpy(), cmap="jet")
-            axes[2].set_title("Prediction")
+            axes[2].set_title("Without watershed")
             axes[2].axis('off')
 
-            # Horizontal gradient
-            axes[3].imshow(hv_logits[i, 0].cpu().numpy(), cmap='viridis')
-            axes[3].set_title("HoVer Horizontal")
+            axes[3].imshow(np_pred[i].cpu().numpy(), cmap='gray')
+            axes[3].set_title("Binary Segmentation")
             axes[3].axis('off')
 
-            # Vertical gradient
-            axes[4].imshow(hv_logits[i, 1].cpu().numpy(), cmap='viridis')
-            axes[4].set_title("HoVer Vertical")
+            # Horizontal gradient
+            axes[4].imshow(hv_logits[i, 0].cpu().numpy(), cmap='viridis')
+            axes[4].set_title("HoVer Horizontal")
             axes[4].axis('off')
 
-            axes[5].imshow(np_pred[i].cpu().numpy(), cmap='gray')
-            axes[5].set_title("Binary Segmentation")
+            # Vertical gradient
+            axes[5].imshow(hv_logits[i, 1].cpu().numpy(), cmap='viridis')
+            axes[5].set_title("HoVer Vertical")
             axes[5].axis('off')
 
-            axes[6].imshow(postprocessed_pred[i].cpu().numpy(), cmap="jet")
-            axes[6].set_title("Post Processed")
+            # Watershed instance ids, then the class written onto each instance.
+            axes[6].imshow(pred_inst[i].cpu().numpy(), cmap="jet")
+            axes[6].set_title("With watershed")
             axes[6].axis('off')
+
+            axes[7].imshow(pred_type[i].cpu().numpy(), cmap="jet")
+            axes[7].set_title("Watershed types")
+            axes[7].axis('off')
 
             plt.tight_layout()
 

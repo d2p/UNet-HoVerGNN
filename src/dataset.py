@@ -33,13 +33,21 @@ class SegmentationDataset(Dataset):
         h_map = (h_map.astype(np.float32) / 127.5) - 1.0
         v_map = (v_map.astype(np.float32) / 127.5) - 1.0
 
+        inst_path = os.path.join(sample_dir, "inst.npy")
+        if os.path.exists(inst_path):
+            inst = np.load(inst_path).astype(np.int64)
+        else:
+            # Negative ids tell the metric code to rebuild instances from the hover maps.
+            inst = np.full(mask.shape, -1, dtype=np.int64)
+
         if self.transform:
             image = self.transform(image)
 
         return image, \
                 torch.from_numpy(mask).long(), \
                 torch.from_numpy(h_map).float(), \
-                torch.from_numpy(v_map).float()
+                torch.from_numpy(v_map).float(), \
+                torch.from_numpy(inst).long()
     
 if __name__ == "__main__":
     from config import Config
@@ -66,8 +74,9 @@ if __name__ == "__main__":
     print("Second fold:", len(val_dataloader))
     print("Third fold:", len(test_dataloader))
 
-    image, mask, h_map, v_map = next(iter(train_dataloader))
+    image, mask, h_map, v_map, inst = next(iter(train_dataloader))
     print(image.shape)
     print(mask.shape)
     print(h_map.shape)
     print(v_map.shape)
+    print(inst.shape)

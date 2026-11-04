@@ -1,291 +1,336 @@
 from tqdm import tqdm
 import torch
 from torch.amp import GradScaler, autocast
-import segmentation_models_pytorch as smp
-from postprocess import get_node_labels_from_coords, postprocess_hovernet_output
+from postprocess import (
+    apply_gnn_instance_labels,
+    centroids_from_instances,
+    instance_majority_labels,
+    postprocess_hovernet_output,
+    resolve_gt_instances,
+)
 import os
 from config import Config
+from metrics import HoverNetMetrics
 import matplotlib.pyplot as plt
 import pandas as pd
 from datetime import datetime
 
-def train_one_epoch(model, dataloader, optimizer, criterion, device, num_classes=5):
-    model.train()
-    scaler = GradScaler()
 
+def _to_device(batch, device):
+    image, mask, h_grads, v_grads, inst = batch
+    return (
+        image.to(device),
+        mask.to(device).long(),
+        h_grads.to(device),
+        v_grads.to(device),
+        inst.to(device),
+    )
+
+
+def _pixel_class_scores(pred, target, num_classes):
+    """Per-class pixel IoU and F1 for one batch. Class 0 is included."""
+    ious = []
+    f1s = []
+    for class_id in range(num_classes):
+        pred_c = pred == class_id
+        true_c = target == class_id
+        tp = (pred_c & true_c).sum().float()
+        fp = (pred_c & ~true_c).sum().float()
+        fn = (~pred_c & true_c).sum().float()
+        ious.append(tp / (tp + fp + fn + 1e-8))
+        f1s.append(2.0 * tp / (2.0 * tp + fp + fn + 1e-8))
+    return torch.stack(ious), torch.stack(f1s)
+
+
+def _gt_graph_nodes(model, mask, h_grads, v_grads, inst):
+    """One training node per ground-truth nucleus. Unused while the graph is off."""
+    if not model.use_graph:
+        return None, None
+    gt_inst = resolve_gt_instances(mask, h_grads, v_grads, inst)
+    coords, inst_ids = centroids_from_instances(gt_inst)
+    labels = instance_majority_labels(gt_inst, mask, inst_ids)
+    keep = labels != 0
+    if not bool(keep.any()):
+        return None, None
+    return coords[keep], labels[keep]
+
+
+def train_one_epoch(model, dataloader, optimizer, criterion, device, scaler):
+    model.train()
     total_loss = 0.0
-    total_iou = 0.0
-    total_f1 = 0.0
-    total_pq = 0.0
-    total_f1_per_class = torch.zeros(num_classes, dtype=torch.float32, device=device)
     count = 0
+    use_amp = device.type == "cuda"
 
     loop = tqdm(dataloader, desc="Training", leave=True)
-    for image, mask, h_grads, v_grads in loop:
-        image = image.to(device)
-        mask = mask.to(device).long()
-        h_grads = h_grads.to(device)
-        v_grads = v_grads.to(device)
-
+    for batch in loop:
+        image, mask, h_grads, v_grads, inst = _to_device(batch, device)
         nc_targets = mask
         np_targets = (mask > 0).long()
+        node_coords, node_labels = _gt_graph_nodes(model, mask, h_grads, v_grads, inst)
 
         optimizer.zero_grad()
-
-        with autocast(device.type):
-            np_logits, hv_logits, nc_logits, centroids, gc_logits = model(image)
-
-            # Get graph branch labels
-            if gc_logits is not None and centroids.shape[0] > 0:
-                gc_targets = get_node_labels_from_coords(centroids, nc_targets)
-                valid = gc_targets != 0
-                if valid.any():
-                    gc_input = (gc_logits[valid], gc_targets[valid])
-                else:
-                    gc_input = (None, None)
+        with autocast(device.type, enabled=use_amp):
+            np_logits, hv_logits, nc_logits, _, gc_logits = model(image, node_coords=node_coords)
+            if gc_logits is not None and node_labels is not None:
+                graph_inputs = (gc_logits, node_labels)
             else:
-                gc_input = (None, None)
-
-            # Compute total loss
+                graph_inputs = (None, None)
             loss = criterion(
                 np_logits, np_targets,
                 hv_logits, h_grads, v_grads,
                 nc_logits, nc_targets,
-                *gc_input
+                *graph_inputs,
             )
 
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-
-        with torch.no_grad():
-            nc_pred = torch.argmax(nc_logits, dim=1)
-            tp, fp, fn, tn = smp.metrics.get_stats(
-                nc_pred, nc_targets,
-                mode='multiclass',
-                num_classes=num_classes  # assuming class 0 is background
-            )
-
-            iou_per_class = smp.metrics.iou_score(tp, fp, fn, tn, reduction='none').mean(dim=0)
-            f1_per_class = smp.metrics.f1_score(tp, fp, fn, tn, reduction='none').mean(dim=0)
-            pq_per_class = 2 * iou_per_class * f1_per_class / (iou_per_class + f1_per_class + 1e-8)
+        if scaler is not None and use_amp:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
 
         total_loss += loss.item()
-        total_iou += iou_per_class[1:].mean().item()
-        total_f1 += f1_per_class[1:].mean().item()
-        total_pq += pq_per_class[1:].mean().item()
-        total_f1_per_class += f1_per_class.to(device)  # accumulate per class
         count += 1
+        loop.set_postfix(loss=total_loss / count)
 
-        loop.set_postfix(
-            loss=total_loss / count,
-            iou=total_iou / count,
-            f1=total_f1 / count,
-            pq=total_pq / count,
-            f1_per_class=[round(x.item() / count, 4) for x in f1_per_class][1:]
-        )
+    return total_loss / max(count, 1)
 
-    return (
-        total_loss / count,
-        total_iou / count,
-        total_f1 / count,
-        total_pq / count,
-        (total_f1_per_class / count).tolist()
-    )
 
 @torch.no_grad()
-def validate(model, dataloader, criterion, device, num_classes=5, post_process=False):
+def validate(model, dataloader, criterion, device, num_classes=5, post_process=True):
+    """Score one split.
+
+    post_process=True runs the HoVer watershed and reports instance AJI, DQ, SQ,
+    PQ, and detection F1. The type map is the NC majority vote, replaced by the
+    GNN class of each predicted instance when the graph stage is on.
+    post_process=False scores the raw NC argmax with pixel IoU and pixel F1.
+    """
     model.eval()
     total_loss = 0.0
-    total_iou = 0.0
-    total_f1 = 0.0
-    total_pq = 0.0
-    total_f1_per_class = torch.zeros(num_classes, dtype=torch.float32, device=device)
     count = 0
+    meter = HoverNetMetrics(num_classes=num_classes, radius=Config.MATCH_RADIUS) if post_process else None
+    total_pixel_iou = 0.0
+    total_pixel_f1 = 0.0
+    total_pixel_f1_per_class = torch.zeros(num_classes, dtype=torch.float32, device=device)
+    use_amp = device.type == "cuda"
 
     loop = tqdm(dataloader, desc="Validation", leave=True)
-    for image, mask, h_grads, v_grads in loop:
-        image = image.to(device)
-        mask = mask.to(device).long()
-        h_grads = h_grads.to(device)
-        v_grads = v_grads.to(device)
-
+    for batch in loop:
+        image, mask, h_grads, v_grads, inst = _to_device(batch, device)
         nc_targets = mask
         np_targets = (mask > 0).long()
+        # Instance ids are only needed when the watershed scores are being computed.
+        gt_inst = resolve_gt_instances(mask, h_grads, v_grads, inst) if post_process else None
+        node_coords, node_labels = _gt_graph_nodes(model, mask, h_grads, v_grads, inst)
 
-        np_logits, hv_logits, nc_logits, centroids, gc_logits = model(image)
-
-        # Process graph branch if available
-        if gc_logits is not None and centroids.shape[0] > 0:
-            gc_targets = get_node_labels_from_coords(centroids, nc_targets)
-            valid = gc_targets != 0
-            if valid.any():
-                gc_input = (gc_logits[valid], gc_targets[valid])
+        with autocast(device.type, enabled=use_amp):
+            np_logits, hv_logits, nc_logits, _, gc_logits = model(image, node_coords=node_coords)
+            if gc_logits is not None and node_labels is not None:
+                graph_inputs = (gc_logits, node_labels)
             else:
-                gc_input = (None, None)
-        else:
-            gc_input = (None, None)
-
-        # Compute total loss
-        loss = criterion(
-            np_logits, np_targets,
-            hv_logits, h_grads, v_grads,
-            nc_logits, nc_targets,
-            *gc_input
-        )
+                graph_inputs = (None, None)
+            loss = criterion(
+                np_logits, np_targets,
+                hv_logits, h_grads, v_grads,
+                nc_logits, nc_targets,
+                *graph_inputs,
+            )
 
         if post_process:
-            nc_pred = postprocess_hovernet_output(np_logits, hv_logits, nc_logits, device)
+            # Instance ids from the watershed. GNN classes replace the NC vote per instance.
+            pred_inst, pred_type = postprocess_hovernet_output(
+                np_logits, hv_logits, nc_logits, device, nr_types=num_classes
+            )
+            if model.use_graph:
+                pred_coords, pred_ids = centroids_from_instances(pred_inst)
+                _, pred_logits = model.classify_nodes(image, pred_coords)
+                pred_type = apply_gnn_instance_labels(pred_inst, pred_ids, pred_logits, pred_type)
+
+            for b in range(image.shape[0]):
+                meter.update(
+                    gt_inst[b].detach().cpu().numpy(),
+                    pred_inst[b].detach().cpu().numpy(),
+                    mask[b].detach().cpu().numpy(),
+                    pred_type[b].detach().cpu().numpy(),
+                )
         else:
+            # Raw class map. These are pixel scores, kept apart from AJI and PQ.
             nc_pred = torch.argmax(nc_logits, dim=1)
-
-        tp, fp, fn, tn = smp.metrics.get_stats(
-            nc_pred, nc_targets,
-            mode='multiclass',
-            num_classes=num_classes   # if class 0 is background
-        )
-
-        iou_per_class = smp.metrics.iou_score(tp, fp, fn, tn, reduction='none').mean(dim=0)  # [1:] to skip background
-        f1_per_class = smp.metrics.f1_score(tp, fp, fn, tn, reduction='none').mean(dim=0)
-        pq_per_class = 2 * iou_per_class * f1_per_class / (iou_per_class + f1_per_class + 1e-8)
+            iou_per_class, f1_per_class = _pixel_class_scores(nc_pred, nc_targets, num_classes)
+            total_pixel_iou += iou_per_class[1:].mean().item()
+            total_pixel_f1 += f1_per_class[1:].mean().item()
+            total_pixel_f1_per_class += f1_per_class
 
         total_loss += loss.item()
-        total_iou += iou_per_class[1:].mean().item()
-        total_f1 += f1_per_class[1:].mean().item()
-        total_pq += pq_per_class[1:].mean().item()
-        total_f1_per_class += f1_per_class.to(device)  # accumulate
         count += 1
+        loop.set_postfix(loss=total_loss / max(count, 1))
 
-        loop.set_postfix(
-            loss=total_loss / count,
-            iou=total_iou / count,
-            f1=total_f1 / count,
-            pq=total_pq / count,
-            f1_per_class=[round(x.item() / count, 4) for x in f1_per_class][1:]
-        )
+    if post_process:
+        scores = meter.compute()
+        scores["loss"] = total_loss / max(count, 1)
+        scores["post_process"] = True
+        return scores
 
-    return (
-        total_loss / count,
-        total_iou / count,
-        total_f1 / count,
-        total_pq / count,
-        (total_f1_per_class / count).tolist()
-    )
+    class_f1 = (total_pixel_f1_per_class / max(count, 1)).tolist()
+    return {
+        "loss": total_loss / max(count, 1),
+        "pixel_iou": total_pixel_iou / max(count, 1),
+        "pixel_f1": total_pixel_f1 / max(count, 1),
+        "pixel_f1_per_class": class_f1[1:],
+        "post_process": False,
+    }
 
-def train(model, criterion, train_loader, val_loader, device, 
-          epochs=20, lr=1e-4, num_classes=5, patience=5):
-    
+
+def train(model, criterion, train_loader, val_loader, device,
+          epochs=20, lr=1e-4, num_classes=5, patience=5, post_process=True):
+
     def train_loop(stage_name, use_graph, start_epoch=1, lr=lr):
-        nonlocal best_val_pq
+        nonlocal best_val_score
         nonlocal epochs_no_improve
 
-        best_val_pq = -float('inf')
+        best_val_score = -float("inf")
         epochs_no_improve = 0
-        
-        print(f"\n=== Starting {stage_name} phase ===")
-        model.set_stage('pretrain' if not use_graph else 'finetune')
 
+        print(f"\n=== Starting {stage_name} phase ===")
+        model.set_stage("pretrain" if not use_graph else "finetune")
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-        
+        scaler = GradScaler(device.type, enabled=device.type == "cuda")
+
         for epoch in range(epochs):
             current_epoch = start_epoch + epoch
             print(f"\nEpoch {current_epoch}/{start_epoch + epochs - 1} [{stage_name}]")
-            
-            train_loss, train_iou, train_f1, train_pq, train_f1_per_class = train_one_epoch(
-                model, train_loader, optimizer, criterion, device, num_classes)
-            val_loss, val_iou, val_f1, val_pq, val_f1_per_class = validate(
-                model, val_loader, criterion, device, num_classes)
 
-            # Store metrics
+            train_loss = train_one_epoch(
+                model, train_loader, optimizer, criterion, device, scaler
+            )
+            val_scores = validate(
+                model, val_loader, criterion, device, num_classes, post_process=post_process
+            )
+
             train_losses.append(train_loss)
-            val_losses.append(val_loss)
-            train_ious.append(train_iou)
-            val_ious.append(val_iou)
-            train_f1s.append(train_f1)
-            val_f1s.append(val_f1)
-            train_pqs.append(train_pq)
-            val_pqs.append(val_pq)
-    
-            print(f"Train Loss: {train_loss:.4f} | IoU: {train_iou:.4f} | F1: {train_f1:.4f} | PQ: {train_pq:.4f}")
-            print(f"Val   Loss: {val_loss:.4f} | IoU: {val_iou:.4f} | F1: {val_f1:.4f} | PQ: {val_pq:.4f}")
-            
-            # Print per-class F1 (excluding background class 0)
-            train_f1_str = " | ".join(f"Class {i+1}: {x:.4f}" for i, x in enumerate(train_f1_per_class[1:]))
-            val_f1_str = " | ".join(f"Class {i+1}: {x:.4f}" for i, x in enumerate(val_f1_per_class[1:]))
-            print(f"Train F1 per class: {train_f1_str}")
-            print(f"Val   F1 per class: {val_f1_str}")
-    
-            if val_pq > best_val_pq:
-                best_val_pq = val_pq
+            val_losses.append(val_scores["loss"])
+            if post_process:
+                val_ajis.append(val_scores["aji"])
+                val_dqs.append(val_scores["dq"])
+                val_sqs.append(val_scores["sq"])
+                val_pqs.append(val_scores["pq"])
+                val_fds.append(val_scores["f1_d"])
+                monitor = val_scores["pq"]
+                per_class = val_scores["f1_per_class"]
+            else:
+                val_pixel_ious.append(val_scores["pixel_iou"])
+                val_pixel_f1s.append(val_scores["pixel_f1"])
+                monitor = val_scores["pixel_f1"]
+                per_class = val_scores["pixel_f1_per_class"]
+
+            print(f"Train Loss: {train_loss:.4f}")
+            if post_process:
+                print(
+                    f"Val   Loss: {val_scores['loss']:.4f} | AJI: {val_scores['aji']:.4f} | "
+                    f"DQ: {val_scores['dq']:.4f} | SQ: {val_scores['sq']:.4f} | "
+                    f"PQ: {val_scores['pq']:.4f} | F1_d: {val_scores['f1_d']:.4f}"
+                )
+                print("Val detection F1 per class: " + " | ".join(
+                    f"Class {i + 1}: {score:.4f}" for i, score in enumerate(per_class)
+                ))
+            else:
+                print(
+                    f"Val   Loss: {val_scores['loss']:.4f} | pixel IoU: {val_scores['pixel_iou']:.4f} | "
+                    f"pixel F1: {val_scores['pixel_f1']:.4f}"
+                )
+                print("Val pixel F1 per class: " + " | ".join(
+                    f"Class {i + 1}: {score:.4f}" for i, score in enumerate(per_class)
+                ))
+
+            if monitor > best_val_score:
+                best_val_score = monitor
                 epochs_no_improve = 0
                 best_model_path = os.path.join(Config.OUTPUT_PATH, f"best_hovernet_{stage_name}.pt")
                 torch.save(model.state_dict(), best_model_path)
-                print(f"Saved best model (based on PQ) to {best_model_path}.")
+                print(f"Saved best model (based on {monitor_name}) to {best_model_path}.")
             else:
                 epochs_no_improve += 1
-                print(f"No improvement in PQ for {epochs_no_improve} epoch(s).")
+                print(f"No improvement in {monitor_name} for {epochs_no_improve} epoch(s).")
 
             if epochs_no_improve >= patience:
-                print(f"Early stopping triggered after {patience} epochs with no improvement in PQ.")
+                print(f"Early stopping triggered after {patience} epochs with no improvement in {monitor_name}.")
                 break
-        
+
         return current_epoch + 1
 
-    # Track metrics
     train_losses, val_losses = [], []
-    train_ious, val_ious = [], []
-    train_f1s, val_f1s = [], []
-    train_pqs, val_pqs = [], []
+    val_ajis, val_dqs, val_sqs, val_pqs, val_fds = [], [], [], [], []
+    val_pixel_ious, val_pixel_f1s = [], []
+    monitor_name = "PQ" if post_process else "pixel F1"
 
-    best_val_pq = -float('inf')
+    best_val_score = -float("inf")
     epochs_no_improve = 0
 
-    next_epoch = train_loop(stage_name='pretrain', use_graph=False, start_epoch=1)
-    next_epoch = train_loop(stage_name='finetune', use_graph=True, start_epoch=next_epoch, lr=1e-2)
+    next_epoch = train_loop(stage_name="pretrain", use_graph=False, start_epoch=1)
+    next_epoch = train_loop(stage_name="finetune", use_graph=True, start_epoch=next_epoch, lr=1e-2)
 
-    print(f"\nTraining complete. Best Val PQ: {best_val_pq:.4f}")
+    print(f"\nTraining complete. Best Val {monitor_name}: {best_val_score:.4f}")
 
-    # Create output directory
     os.makedirs(Config.OUTPUT_PATH, exist_ok=True)
-    
-    # Generate timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # === Plotting ===
+
     epochs_range = range(1, len(train_losses) + 1)
-    plt.figure(figsize=(20, 5))
-
+    plt.figure(figsize=(16, 4))
     plt.subplot(1, 4, 1)
-    plt.plot(epochs_range, train_losses, label='Train Loss')
-    plt.plot(epochs_range, val_losses, label='Val Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Loss over Epochs')
+    plt.plot(epochs_range, train_losses, label="Train Loss")
+    plt.plot(epochs_range, val_losses, label="Val Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Loss")
     plt.legend()
 
-    plt.subplot(1, 4, 2)
-    plt.plot(epochs_range, train_ious, label='Train IoU')
-    plt.plot(epochs_range, val_ious, label='Val IoU')
-    plt.xlabel('Epoch')
-    plt.ylabel('IoU')
-    plt.title('IoU over Epochs')
-    plt.legend()
+    if post_process:
+        plt.subplot(1, 4, 2)
+        plt.plot(epochs_range, val_ajis, label="Val AJI")
+        plt.xlabel("Epoch")
+        plt.ylabel("AJI")
+        plt.title("AJI")
+        plt.legend()
 
-    plt.subplot(1, 4, 3)
-    plt.plot(epochs_range, train_f1s, label='Train F1')
-    plt.plot(epochs_range, val_f1s, label='Val F1')
-    plt.xlabel('Epoch')
-    plt.ylabel('F1 Score')
-    plt.title('F1 over Epochs')
-    plt.legend()
+        plt.subplot(1, 4, 3)
+        plt.plot(epochs_range, val_pqs, label="Val PQ")
+        plt.xlabel("Epoch")
+        plt.ylabel("PQ")
+        plt.title("PQ")
+        plt.legend()
 
-    plt.subplot(1, 4, 4)
-    plt.plot(epochs_range, train_pqs, label='Train PQ')
-    plt.plot(epochs_range, val_pqs, label='Val PQ')
-    plt.xlabel('Epoch')
-    plt.ylabel('PQ')
-    plt.title('PQ over Epochs')
-    plt.legend()
+        plt.subplot(1, 4, 4)
+        plt.plot(epochs_range, val_fds, label="Val F1_d")
+        plt.xlabel("Epoch")
+        plt.ylabel("F1")
+        plt.title("Detection F1")
+        plt.legend()
+        metric_columns = {
+            "Val AJI": val_ajis,
+            "Val DQ": val_dqs,
+            "Val SQ": val_sqs,
+            "Val PQ": val_pqs,
+            "Val F1_d": val_fds,
+        }
+    else:
+        plt.subplot(1, 4, 2)
+        plt.plot(epochs_range, val_pixel_ious, label="Val pixel IoU")
+        plt.xlabel("Epoch")
+        plt.ylabel("IoU")
+        plt.title("Pixel IoU")
+        plt.legend()
+
+        plt.subplot(1, 4, 3)
+        plt.plot(epochs_range, val_pixel_f1s, label="Val pixel F1")
+        plt.xlabel("Epoch")
+        plt.ylabel("F1")
+        plt.title("Pixel F1")
+        plt.legend()
+        metric_columns = {
+            "Val pixel IoU": val_pixel_ious,
+            "Val pixel F1": val_pixel_f1s,
+        }
 
     plt.tight_layout()
     plot_path = os.path.join(Config.OUTPUT_PATH, f"training_metrics_{timestamp}.png")
@@ -293,91 +338,60 @@ def train(model, criterion, train_loader, val_loader, device,
     plt.close()
     print(f"Saved training metrics plot to {plot_path}")
 
-    # === Save metrics ===
     metrics_df = pd.DataFrame({
         "Epoch": list(epochs_range),
         "Train Loss": train_losses,
         "Val Loss": val_losses,
-        "Train IoU": train_ious,
-        "Val IoU": val_ious,
-        "Train F1": train_f1s,
-        "Val F1": val_f1s,
-        "Train PQ": train_pqs,
-        "Val PQ": val_pqs,
+        **metric_columns,
     })
     csv_path = os.path.join(Config.OUTPUT_PATH, f"training_metrics_{timestamp}.csv")
     metrics_df.to_csv(csv_path, index=False)
     print(f"Saved training metrics to {csv_path}")
 
-@torch.no_grad()
-def final_evaluate(model, test_loader, criterion, device, stage_name, num_classes=6):
-    # Ensure output directory exists
-    os.makedirs(Config.OUTPUT_PATH, exist_ok=True)
 
-    # Load best model checkpoint
+@torch.no_grad()
+def final_evaluate(model, test_loader, criterion, device, stage_name, num_classes=6, post_process=True):
+    os.makedirs(Config.OUTPUT_PATH, exist_ok=True)
     model_path = os.path.join(Config.OUTPUT_PATH, f"best_hovernet_{stage_name}.pt")
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.set_stage(stage_name)
 
-    # Perform validation
-    test_loss, test_iou, test_f1, test_pq, f1_per_class = validate(
-        model, test_loader, criterion, device, num_classes, post_process=False
+    scores = validate(
+        model, test_loader, criterion, device, num_classes, post_process=post_process
     )
+    if scores["post_process"]:
+        print(
+            f"\nFinal Test [{stage_name}] | Loss: {scores['loss']:.4f} | "
+            f"AJI: {scores['aji']:.4f} | DQ: {scores['dq']:.4f} | "
+            f"SQ: {scores['sq']:.4f} | PQ: {scores['pq']:.4f} | F1_d: {scores['f1_d']:.4f}"
+        )
+        print("Per-class detection F1:", scores["f1_per_class"])
+        metrics = {
+            "Loss": [scores["loss"]],
+            "AJI": [scores["aji"]],
+            "DQ": [scores["dq"]],
+            "SQ": [scores["sq"]],
+            "PQ": [scores["pq"]],
+            "F1_d": [scores["f1_d"]],
+        }
+        per_class = scores["f1_per_class"]
+    else:
+        print(
+            f"\nFinal Test [{stage_name}] | Loss: {scores['loss']:.4f} | "
+            f"pixel IoU: {scores['pixel_iou']:.4f} | pixel F1: {scores['pixel_f1']:.4f}"
+        )
+        print("Per-class pixel F1:", scores["pixel_f1_per_class"])
+        metrics = {
+            "Loss": [scores["loss"]],
+            "pixel_IoU": [scores["pixel_iou"]],
+            "pixel_F1": [scores["pixel_f1"]],
+        }
+        per_class = scores["pixel_f1_per_class"]
 
-    # Print results
-    print(f"\nFinal Test | Loss: {test_loss:.4f} | IoU: {test_iou:.4f} | F1: {test_f1:.4f} | PQ: {test_pq:.4f}")
-    print("F1 per class (excluding background):", f1_per_class)
-
-    # Save metrics to CSV
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     results_file = os.path.join(Config.OUTPUT_PATH, f"final_eval_{stage_name}_{timestamp}.csv")
-
-    metrics = {
-        "Loss": [test_loss],
-        "IoU": [test_iou],
-        "F1": [test_f1],
-        "PQ": [test_pq],
-    }
-    # Add F1 per class (C1...Cn)
-    for i, f1 in enumerate(f1_per_class, start=1):
+    for i, f1 in enumerate(per_class, start=1):
         metrics[f"F1_Class_{i}"] = [f1]
-
     pd.DataFrame(metrics).to_csv(results_file, index=False)
     print(f"Saved final evaluation metrics to {results_file}")
-
-if __name__ == "__main__":
-    from config import Config
-    from unet_hovergnn import GraphHoverNet
-    from loss_function import HoverLoss
-    import segmentation_models_pytorch as smp
-    from dataset import SegmentationDataset
-    from torchvision import transforms
-    from torch.utils.data import DataLoader
-    from visualization import visualize_hovernet_output
-    import os
-
-    transform = transforms.Compose([
-        transforms.ToTensor(),  # Converts HWC to CHW and scales to [0, 1]
-        transforms.Normalize(mean=[0.5]*3, std=[0.5]*3)  # example: scale to [-1, 1]
-    ])
-
-    dataset_path = os.path.join(Config.DATA_PATH, Config.DATASET)
-
-    train_dataset = SegmentationDataset(dataset_path, split="train", transform=transform)
-    val_dataset = SegmentationDataset(dataset_path, split="val", transform=transform)
-    test_dataset = SegmentationDataset(dataset_path, split="test", transform=transform)
-
-    train_dataloader = DataLoader(train_dataset, batch_size=Config.BATCH_SIZE, shuffle=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=Config.BATCH_SIZE, shuffle=False)
-    test_dataloader = DataLoader(test_dataset, batch_size=Config.BATCH_SIZE, shuffle=False)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = GraphHoverNet(num_classes=Config.NUM_CLASSES)
-    model = model.to(device)
-    criterion = HoverLoss()
-
-    train(model, criterion, train_dataloader, val_dataloader, device, num_classes=Config.NUM_CLASSES, epochs=2, patience=2)
-
-    final_evaluate(model, test_dataloader, criterion, device, "pretrain", num_classes=Config.NUM_CLASSES)
-
-    final_evaluate(model, test_dataloader, criterion, device, "finetune", num_classes=Config.NUM_CLASSES)
+    return scores

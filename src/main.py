@@ -15,13 +15,17 @@ from visualization import plot_validation_samples
 def parse_args():
     parser = argparse.ArgumentParser(description="Train and Evaluate UNet-HoVerGNN")
     parser.add_argument("--dataset", type=str, default=Config.DATASET,
-                        help="Dataset name (e.g., MoNuSAC, PanNuke, CoNSeP_Tiled)")
+                        help="Dataset name: MoNuSAC, PanNuke, CoNSeP_Tiled, MoNuSeg, or MoNuSeg_37")
     parser.add_argument("--num_classes", type=int, default=Config.NUM_CLASSES,
-                        help="Number of classes in the dataset")
+                        help="Class count including background. MoNuSeg/MoNuSeg_37: use 2")
     parser.add_argument("--data_path", type=str, default=Config.DATA_PATH,
                         help="Path to dataset root directory")
     parser.add_argument("--output_path", type=str, default=Config.OUTPUT_PATH,
                         help="Path to save outputs (logs, checkpoints, metrics)")
+    parser.add_argument("--epochs", type=int, default=Config.STAGE_EPOCH,
+                        help="Epochs per stage. Pretrain and finetune each run this many")
+    parser.add_argument("--post_process", action=argparse.BooleanOptionalAction, default=Config.POST_PROCESS,
+                        help="Score with the HoVer watershed. --no-post-process scores the raw NC argmax")
     return parser.parse_args()
 
 
@@ -33,6 +37,7 @@ if __name__ == "__main__":
     Config.NUM_CLASSES = args.num_classes
     Config.DATA_PATH = args.data_path
     Config.OUTPUT_PATH = args.output_path
+    Config.POST_PROCESS = args.post_process
 
     # Ensure output path exists
     os.makedirs(Config.OUTPUT_PATH, exist_ok=True)
@@ -61,11 +66,14 @@ if __name__ == "__main__":
 
     # Train model
     train(model, criterion, train_dataloader, val_dataloader, device,
-          num_classes=Config.NUM_CLASSES, epochs=Config.STAGE_EPOCH, patience=Config.PATIENCE)
+          num_classes=Config.NUM_CLASSES, epochs=args.epochs, patience=Config.PATIENCE,
+          post_process=Config.POST_PROCESS)
 
     # Evaluate model (pretraining and finetuning)
-    final_evaluate(model, test_dataloader, criterion, device, "pretrain", num_classes=Config.NUM_CLASSES)
-    final_evaluate(model, test_dataloader, criterion, device, "finetune", num_classes=Config.NUM_CLASSES)
+    final_evaluate(model, test_dataloader, criterion, device, "pretrain",
+                   num_classes=Config.NUM_CLASSES, post_process=Config.POST_PROCESS)
+    final_evaluate(model, test_dataloader, criterion, device, "finetune",
+                   num_classes=Config.NUM_CLASSES, post_process=Config.POST_PROCESS)
 
-    # Plot validation samples
+    # Each saved figure shows the raw class map and the watershed instance map.
     plot_validation_samples(model, test_dataloader, device, Config.NUM_CLASSES)
