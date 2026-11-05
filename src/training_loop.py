@@ -10,7 +10,7 @@ from postprocess import (
 )
 import os
 from config import Config
-from metrics import HoverNetMetrics
+from metrics import BinaryDiceMeter, HoverNetMetrics
 import matplotlib.pyplot as plt
 import pandas as pd
 from datetime import datetime
@@ -105,11 +105,14 @@ def validate(model, dataloader, criterion, device, num_classes=5, post_process=T
     PQ, and detection F1. The type map is the NC majority vote, replaced by the
     GNN class of each predicted instance when the graph stage is on.
     post_process=False scores the raw NC argmax with pixel IoU and pixel F1.
+    Both paths report binary Dice of the NP head (nucleus versus background).
+    For this two-class mask, Dice and foreground F1 are the same number.
     """
     model.eval()
     total_loss = 0.0
     count = 0
     meter = HoverNetMetrics(num_classes=num_classes, radius=Config.MATCH_RADIUS) if post_process else None
+    dice_meter = BinaryDiceMeter()
     total_pixel_iou = 0.0
     total_pixel_f1 = 0.0
     total_pixel_f1_per_class = torch.zeros(num_classes, dtype=torch.float32, device=device)
@@ -136,6 +139,11 @@ def validate(model, dataloader, criterion, device, num_classes=5, post_process=T
                 nc_logits, nc_targets,
                 *graph_inputs,
             )
+
+        # Binary segmentation of the nuclear head. Class labels are collapsed
+        # to nucleus versus background, which is the NP training target.
+        pred_fg = torch.argmax(np_logits, dim=1) > 0
+        dice_meter.update(pred_fg.detach().cpu().numpy(), (mask > 0).detach().cpu().numpy())
 
         if post_process:
             # Instance ids from the watershed. GNN classes replace the NC vote per instance.
@@ -166,9 +174,11 @@ def validate(model, dataloader, criterion, device, num_classes=5, post_process=T
         count += 1
         loop.set_postfix(loss=total_loss / max(count, 1))
 
+    dice = dice_meter.compute()
     if post_process:
         scores = meter.compute()
         scores["loss"] = total_loss / max(count, 1)
+        scores["dice"] = dice
         scores["post_process"] = True
         return scores
 
@@ -178,6 +188,7 @@ def validate(model, dataloader, criterion, device, num_classes=5, post_process=T
         "pixel_iou": total_pixel_iou / max(count, 1),
         "pixel_f1": total_pixel_f1 / max(count, 1),
         "pixel_f1_per_class": class_f1[1:],
+        "dice": dice,
         "post_process": False,
     }
 
@@ -210,6 +221,7 @@ def train(model, criterion, train_loader, val_loader, device,
 
             train_losses.append(train_loss)
             val_losses.append(val_scores["loss"])
+            val_dices.append(val_scores["dice"])
             if post_process:
                 val_ajis.append(val_scores["aji"])
                 val_dqs.append(val_scores["dq"])
@@ -229,7 +241,8 @@ def train(model, criterion, train_loader, val_loader, device,
                 print(
                     f"Val   Loss: {val_scores['loss']:.4f} | AJI: {val_scores['aji']:.4f} | "
                     f"DQ: {val_scores['dq']:.4f} | SQ: {val_scores['sq']:.4f} | "
-                    f"PQ: {val_scores['pq']:.4f} | F1_d: {val_scores['f1_d']:.4f}"
+                    f"PQ: {val_scores['pq']:.4f} | F1_d: {val_scores['f1_d']:.4f} | "
+                    f"Dice: {val_scores['dice']:.4f}"
                 )
                 print("Val detection F1 per class: " + " | ".join(
                     f"Class {i + 1}: {score:.4f}" for i, score in enumerate(per_class)
@@ -237,7 +250,7 @@ def train(model, criterion, train_loader, val_loader, device,
             else:
                 print(
                     f"Val   Loss: {val_scores['loss']:.4f} | pixel IoU: {val_scores['pixel_iou']:.4f} | "
-                    f"pixel F1: {val_scores['pixel_f1']:.4f}"
+                    f"pixel F1: {val_scores['pixel_f1']:.4f} | Dice: {val_scores['dice']:.4f}"
                 )
                 print("Val pixel F1 per class: " + " | ".join(
                     f"Class {i + 1}: {score:.4f}" for i, score in enumerate(per_class)
@@ -261,6 +274,7 @@ def train(model, criterion, train_loader, val_loader, device,
 
     train_losses, val_losses = [], []
     val_ajis, val_dqs, val_sqs, val_pqs, val_fds = [], [], [], [], []
+    val_dices = []
     val_pixel_ious, val_pixel_f1s = [], []
     monitor_name = "PQ" if post_process else "pixel F1"
 
@@ -301,10 +315,10 @@ def train(model, criterion, train_loader, val_loader, device,
         plt.legend()
 
         plt.subplot(1, 4, 4)
-        plt.plot(epochs_range, val_fds, label="Val F1_d")
+        plt.plot(epochs_range, val_dices, label="Val Dice")
         plt.xlabel("Epoch")
-        plt.ylabel("F1")
-        plt.title("Detection F1")
+        plt.ylabel("Dice")
+        plt.title("Binary Dice")
         plt.legend()
         metric_columns = {
             "Val AJI": val_ajis,
@@ -312,6 +326,7 @@ def train(model, criterion, train_loader, val_loader, device,
             "Val SQ": val_sqs,
             "Val PQ": val_pqs,
             "Val F1_d": val_fds,
+            "Val Dice": val_dices,
         }
     else:
         plt.subplot(1, 4, 2)
@@ -327,9 +342,16 @@ def train(model, criterion, train_loader, val_loader, device,
         plt.ylabel("F1")
         plt.title("Pixel F1")
         plt.legend()
+        plt.subplot(1, 4, 4)
+        plt.plot(epochs_range, val_dices, label="Val Dice")
+        plt.xlabel("Epoch")
+        plt.ylabel("Dice")
+        plt.title("Binary Dice")
+        plt.legend()
         metric_columns = {
             "Val pixel IoU": val_pixel_ious,
             "Val pixel F1": val_pixel_f1s,
+            "Val Dice": val_dices,
         }
 
     plt.tight_layout()
@@ -363,7 +385,8 @@ def final_evaluate(model, test_loader, criterion, device, stage_name, num_classe
         print(
             f"\nFinal Test [{stage_name}] | Loss: {scores['loss']:.4f} | "
             f"AJI: {scores['aji']:.4f} | DQ: {scores['dq']:.4f} | "
-            f"SQ: {scores['sq']:.4f} | PQ: {scores['pq']:.4f} | F1_d: {scores['f1_d']:.4f}"
+            f"SQ: {scores['sq']:.4f} | PQ: {scores['pq']:.4f} | F1_d: {scores['f1_d']:.4f} | "
+            f"Dice: {scores['dice']:.4f}"
         )
         print("Per-class detection F1:", scores["f1_per_class"])
         metrics = {
@@ -373,18 +396,21 @@ def final_evaluate(model, test_loader, criterion, device, stage_name, num_classe
             "SQ": [scores["sq"]],
             "PQ": [scores["pq"]],
             "F1_d": [scores["f1_d"]],
+            "Dice": [scores["dice"]],
         }
         per_class = scores["f1_per_class"]
     else:
         print(
             f"\nFinal Test [{stage_name}] | Loss: {scores['loss']:.4f} | "
-            f"pixel IoU: {scores['pixel_iou']:.4f} | pixel F1: {scores['pixel_f1']:.4f}"
+            f"pixel IoU: {scores['pixel_iou']:.4f} | pixel F1: {scores['pixel_f1']:.4f} | "
+            f"Dice: {scores['dice']:.4f}"
         )
         print("Per-class pixel F1:", scores["pixel_f1_per_class"])
         metrics = {
             "Loss": [scores["loss"]],
             "pixel_IoU": [scores["pixel_iou"]],
             "pixel_F1": [scores["pixel_f1"]],
+            "Dice": [scores["dice"]],
         }
         per_class = scores["pixel_f1_per_class"]
 

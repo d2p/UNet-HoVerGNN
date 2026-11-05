@@ -204,6 +204,33 @@ def score_instances(true_inst, pred_inst):
     return {"aji": aji, "dq": dq, "sq": sq, "pq": pq}
 
 
+class BinaryDiceMeter:
+    """Pixel-pooled Dice of nucleus versus background.
+
+    For a binary mask this is the same quantity as the foreground F1:
+    2 TP / (2 TP + FP + FN), summed over every pixel in the split.
+    An empty prediction against an empty target scores 1.
+    """
+
+    def __init__(self):
+        self.tp = 0.0
+        self.fp = 0.0
+        self.fn = 0.0
+
+    def update(self, pred_fg, true_fg):
+        pred_fg = np.asarray(pred_fg, dtype=bool)
+        true_fg = np.asarray(true_fg, dtype=bool)
+        self.tp += float(np.count_nonzero(pred_fg & true_fg))
+        self.fp += float(np.count_nonzero(pred_fg & ~true_fg))
+        self.fn += float(np.count_nonzero(~pred_fg & true_fg))
+
+    def compute(self):
+        denom = 2.0 * self.tp + self.fp + self.fn
+        if denom == 0.0:
+            return 1.0
+        return float(2.0 * self.tp / denom)
+
+
 class HoverNetMetrics:
     """Image-averaged AJI/DQ/SQ/PQ and dataset-pooled detection F1."""
 
@@ -297,6 +324,17 @@ def _self_check():
     out = stats.compute()
     assert abs(out["f1_d"] - 1.0) < 1e-6, out
     assert abs(out["f1_per_class"][0] - 1.0) < 1e-6, out
+
+    dice = BinaryDiceMeter()
+    dice.update(inst > 0, inst > 0)
+    assert abs(dice.compute() - 1.0) < 1e-6
+    half = np.zeros_like(inst)
+    half[:, :8] = inst[:, :8]
+    dice = BinaryDiceMeter()
+    dice.update(half > 0, inst > 0)
+    assert 0.0 < dice.compute() < 1.0, dice.compute()
+    empty = BinaryDiceMeter()
+    assert empty.compute() == 1.0
     print("metrics self-check ok", out)
 
 

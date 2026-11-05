@@ -12,7 +12,7 @@ The first figure is the published UNet-HoVerGNN pipeline. The figure above keeps
 
 - **Loss.** NP and NC are cross-entropy plus the HoVer-Net global Dice loss. HV is mean-squared error on the horizontal and vertical maps, plus a weight-2 Sobel gradient term on nuclear pixels only: the x-derivative of the horizontal map and the y-derivative of the vertical map. This is the HoVer-Net map and gradient loss (Graham et al., 2019), in place of the earlier Laplacian penalty on the predicted maps.
 - **Graph.** Finetune places one node at each ground-truth centroid. At validation and test the GNN class of each predicted centroid is painted onto that watershed instance. Encoder features are resized to the input resolution. The default graph loss is cross-entropy plus Dice. `HoverLoss(graph_loss="gc")` adds the original focal term for comparison.
-- **Scores.** With the watershed on, which is the default, validation reports AJI (Kumar et al., 2017), panoptic DQ, SQ, and PQ at IoU > 0.5 (Kirillov et al., 2019), and centroid detection F1 at 12 px, the HoVer-Net 40× radius (Graham et al., 2019). Early stopping uses PQ. `--no-post-process` scores the raw NC argmax with pixel IoU and pixel F1, and each saved test figure shows both views.
+- **Scores.** Binary Dice of the nuclear head (nucleus versus background) is reported on every split. For that two-class mask, Dice and foreground F1 are the same number. With the watershed on, which is the default, validation also reports AJI (Kumar et al., 2017), panoptic DQ, SQ, and PQ at IoU > 0.5 (Kirillov et al., 2019), and centroid detection F1 at 12 px, the HoVer-Net 40× radius (Graham et al., 2019). Early stopping uses PQ. `--no-post-process` scores the raw NC argmax with pixel IoU and pixel F1, and each saved test figure shows both views.
 - **Ground truth.** `inst.npy` supplies instance ids when it is present, as on MoNuSeg. Otherwise instances are rebuilt from the stored hover maps with the same watershed.
 
 Graham, S., Vu, Q. D., Raza, S. E. A., Azam, A., Tsang, Y. W., Kwak, J. T., & Rajpoot, N. (2019). Hover-Net: Simultaneous segmentation and classification of nuclei in multi-tissue histology images. *Medical Image Analysis, 58*, 101563. [https://doi.org/10.1016/j.media.2019.101563](https://doi.org/10.1016/j.media.2019.101563)
@@ -152,6 +152,7 @@ Training runs a CNN pretrain stage, then a GNN finetune stage, with early stoppi
 
 Validation and test scoring follow HoVer-Net-style instance metrics (`src/metrics.py`):
 
+- **Dice** — binary nucleus-versus-background Dice of the NP head. For this two-class mask it equals foreground F1. Pixels are pooled over the split.
 - **AJI** — MoNuSeg / HoVer-Net fast Aggregated Jaccard Index
 - **PQ / DQ / SQ** — panoptic quality with unique IoU > 0.5 matches
 - **Detection F1** — centroid matching at `MATCH_RADIUS` (12 px at 40×)
