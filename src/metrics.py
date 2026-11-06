@@ -30,60 +30,83 @@ def remap_label(pred, by_size=False):
     return new_pred
 
 
-def get_fast_aji(true, pred):
-    """MoNuSeg / HoVer-Net AJI. Ids must be contiguous starting at 1."""
-    true = np.copy(true)
-    pred = np.copy(pred)
-    true_id_list = list(np.unique(true))
-    pred_id_list = list(np.unique(pred))
+def _foreground_ids(mask):
+    """Instance ids other than background. Background is 0 and may be absent."""
+    ids = np.unique(mask)
+    return ids[ids != 0]
 
-    true_masks = [None]
-    for t in true_id_list[1:]:
-        true_masks.append(np.array(true == t, np.uint8))
 
-    pred_masks = [None]
-    for p in pred_id_list[1:]:
-        pred_masks.append(np.array(pred == p, np.uint8))
+def _overlap_matrices(true, pred):
+    """Pixel overlap of every foreground instance.
 
-    pairwise_inter = np.zeros(
-        [len(true_id_list) - 1, len(pred_id_list) - 1], dtype=np.float64
-    )
-    pairwise_union = np.zeros(
-        [len(true_id_list) - 1, len(pred_id_list) - 1], dtype=np.float64
-    )
+    Returns foreground ids, intersection, union, and each instance's area.
+    Intersection and union have shape (n_true, n_pred). A side with no
+    foreground instances contributes a zero-length axis.
+    """
+    true = np.asarray(true)
+    pred = np.asarray(pred)
+    true_ids = _foreground_ids(true)
+    pred_ids = _foreground_ids(pred)
+    n_true = len(true_ids)
+    n_pred = len(pred_ids)
+    inter = np.zeros((n_true, n_pred), dtype=np.float64)
+    union = np.zeros((n_true, n_pred), dtype=np.float64)
+    true_area = np.zeros(n_true, dtype=np.float64)
+    pred_area = np.zeros(n_pred, dtype=np.float64)
+    if n_true == 0 or n_pred == 0:
+        for ti, t in enumerate(true_ids):
+            true_area[ti] = np.count_nonzero(true == t)
+        for pi, p in enumerate(pred_ids):
+            pred_area[pi] = np.count_nonzero(pred == p)
+        return true_ids, pred_ids, inter, union, true_area, pred_area
 
-    for true_id in true_id_list[1:]:
-        t_mask = true_masks[true_id]
-        pred_true_overlap_id = list(np.unique(pred[t_mask > 0]))
-        for pred_id in pred_true_overlap_id:
+    pred_masks = [pred == p for p in pred_ids]
+    pred_index = {int(p): i for i, p in enumerate(pred_ids)}
+    for pi, p_mask in enumerate(pred_masks):
+        pred_area[pi] = np.count_nonzero(p_mask)
+    for ti, t in enumerate(true_ids):
+        t_mask = true == t
+        true_area[ti] = np.count_nonzero(t_mask)
+        for raw_id in np.unique(pred[t_mask]):
+            pred_id = int(raw_id)
             if pred_id == 0:
                 continue
-            p_mask = pred_masks[pred_id]
-            total = (t_mask + p_mask).sum()
-            inter = (t_mask * p_mask).sum()
-            pairwise_inter[true_id - 1, pred_id - 1] = inter
-            pairwise_union[true_id - 1, pred_id - 1] = total - inter
+            p_mask = pred_masks[pred_index[pred_id]]
+            inter[ti, pred_index[pred_id]] = np.count_nonzero(t_mask & p_mask)
+            union[ti, pred_index[pred_id]] = np.count_nonzero(t_mask | p_mask)
+    return true_ids, pred_ids, inter, union, true_area, pred_area
 
-    pairwise_iou = pairwise_inter / (pairwise_union + 1.0e-6)
+
+def get_fast_aji(true, pred):
+    """MoNuSeg / HoVer-Net AJI.
+
+    Id 0 is background. A map that is entirely foreground is valid: the first
+    unique id is an instance, not background. One ground-truth instance may
+    reuse one predicted instance. Both sides empty scores 1; one side empty
+    scores 0.
+    """
+    true_ids, pred_ids, inter, union, true_area, pred_area = _overlap_matrices(true, pred)
+    if len(true_ids) == 0 and len(pred_ids) == 0:
+        return 1.0
+    if len(true_ids) == 0 or len(pred_ids) == 0:
+        return 0.0
+
+    pairwise_iou = inter / (union + 1.0e-6)
     paired_pred = np.argmax(pairwise_iou, axis=1)
-    pairwise_iou = np.max(pairwise_iou, axis=1)
-    paired_true = np.nonzero(pairwise_iou > 0.0)[0]
+    best_iou = np.max(pairwise_iou, axis=1)
+    paired_true = np.nonzero(best_iou > 0.0)[0]
     paired_pred = paired_pred[paired_true]
-    overall_inter = (pairwise_inter[paired_true, paired_pred]).sum()
-    overall_union = (pairwise_union[paired_true, paired_pred]).sum()
+    overall_inter = inter[paired_true, paired_pred].sum()
+    overall_union = union[paired_true, paired_pred].sum()
 
-    paired_true = list(paired_true + 1)
-    paired_pred = list(paired_pred + 1)
-    unpaired_true = np.array(
-        [idx for idx in true_id_list[1:] if idx not in paired_true]
-    )
-    unpaired_pred = np.array(
-        [idx for idx in pred_id_list[1:] if idx not in paired_pred]
-    )
-    for true_id in unpaired_true:
-        overall_union += true_masks[true_id].sum()
-    for pred_id in unpaired_pred:
-        overall_union += pred_masks[pred_id].sum()
+    paired_true_set = set(int(i) for i in paired_true)
+    paired_pred_set = set(int(i) for i in paired_pred)
+    for ti in range(len(true_ids)):
+        if ti not in paired_true_set:
+            overall_union += true_area[ti]
+    for pi in range(len(pred_ids)):
+        if pi not in paired_pred_set:
+            overall_union += pred_area[pi]
 
     if overall_union == 0:
         return 1.0
@@ -91,59 +114,49 @@ def get_fast_aji(true, pred):
 
 
 def get_fast_pq(true, pred, match_iou=0.5):
-    """Panoptic quality. Returns [dq, sq, pq] and the pairing lists."""
+    """Panoptic quality. Returns [dq, sq, pq] and the pairing lists.
+
+    Pairing lists hold instance ids. Both sides empty scores 1; one side
+    empty scores 0. Id 0 is background and may be absent from the map.
+    """
     assert match_iou >= 0.0
-    true = np.copy(true)
-    pred = np.copy(pred)
-    true_id_list = list(np.unique(true))
-    pred_id_list = list(np.unique(pred))
+    true_ids, pred_ids, inter, union, _, _ = _overlap_matrices(true, pred)
+    if len(true_ids) == 0 and len(pred_ids) == 0:
+        return [1.0, 1.0, 1.0], [[], [], [], []]
+    if len(true_ids) == 0 or len(pred_ids) == 0:
+        return [0.0, 0.0, 0.0], [
+            [],
+            [],
+            [int(i) for i in true_ids],
+            [int(i) for i in pred_ids],
+        ]
 
-    true_masks = [None]
-    for t in true_id_list[1:]:
-        true_masks.append(np.array(true == t, np.uint8))
-    pred_masks = [None]
-    for p in pred_id_list[1:]:
-        pred_masks.append(np.array(pred == p, np.uint8))
-
-    pairwise_iou = np.zeros(
-        [len(true_id_list) - 1, len(pred_id_list) - 1], dtype=np.float64
-    )
-    for true_id in true_id_list[1:]:
-        t_mask = true_masks[true_id]
-        pred_true_overlap_id = list(np.unique(pred[t_mask > 0]))
-        for pred_id in pred_true_overlap_id:
-            if pred_id == 0:
-                continue
-            p_mask = pred_masks[pred_id]
-            total = (t_mask + p_mask).sum()
-            inter = (t_mask * p_mask).sum()
-            pairwise_iou[true_id - 1, pred_id - 1] = inter / (total - inter)
-
+    pairwise_iou = inter / np.maximum(union, 1.0e-6)
     if match_iou >= 0.5:
         pairwise_iou[pairwise_iou <= match_iou] = 0.0
         paired_true, paired_pred = np.nonzero(pairwise_iou)
         paired_iou = pairwise_iou[paired_true, paired_pred]
-        paired_true = list(paired_true + 1)
-        paired_pred = list(paired_pred + 1)
     else:
         paired_true, paired_pred = linear_sum_assignment(-pairwise_iou)
         paired_iou = pairwise_iou[paired_true, paired_pred]
         keep = paired_iou > match_iou
-        paired_true = list(paired_true[keep] + 1)
-        paired_pred = list(paired_pred[keep] + 1)
+        paired_true = paired_true[keep]
+        paired_pred = paired_pred[keep]
         paired_iou = paired_iou[keep]
 
-    unpaired_true = [idx for idx in true_id_list[1:] if idx not in paired_true]
-    unpaired_pred = [idx for idx in pred_id_list[1:] if idx not in paired_pred]
-    tp = len(paired_true)
+    paired_true_ids = [int(true_ids[i]) for i in paired_true]
+    paired_pred_ids = [int(pred_ids[i]) for i in paired_pred]
+    unpaired_true = [int(i) for i in true_ids if int(i) not in paired_true_ids]
+    unpaired_pred = [int(i) for i in pred_ids if int(i) not in paired_pred_ids]
+    tp = len(paired_true_ids)
     fp = len(unpaired_pred)
     fn = len(unpaired_true)
     denom = tp + 0.5 * fp + 0.5 * fn
     dq = tp / denom if denom > 0 else 0.0
     sq = paired_iou.sum() / (tp + 1.0e-6) if tp > 0 else 0.0
     return [float(dq), float(sq), float(dq * sq)], [
-        paired_true,
-        paired_pred,
+        paired_true_ids,
+        paired_pred_ids,
         unpaired_true,
         unpaired_pred,
     ]
@@ -335,6 +348,27 @@ def _self_check():
     assert 0.0 < dice.compute() < 1.0, dice.compute()
     empty = BinaryDiceMeter()
     assert empty.compute() == 1.0
+
+    # A tile with no background pixel used to build a (0, 0) IoU matrix.
+    solid = np.ones((8, 8), np.int32)
+    solid_scores = score_instances(solid, solid.copy())
+    assert abs(solid_scores["aji"] - 1.0) < 1e-6, solid_scores
+    assert abs(solid_scores["pq"] - 1.0) < 1e-5, solid_scores
+
+    tiled = np.ones((8, 8), np.int32)
+    tiled[:, 4:] = 2
+    tiled_scores = score_instances(tiled, tiled.copy())
+    assert abs(tiled_scores["aji"] - 1.0) < 1e-6, tiled_scores
+    assert abs(tiled_scores["pq"] - 1.0) < 1e-5, tiled_scores
+
+    gt = np.zeros((8, 8), np.int32)
+    gt[1:4, 1:4] = 1
+    gt[1:4, 5:8] = 2
+    blob = np.ones_like(gt)
+    blob_scores = score_instances(gt, blob)
+    assert 0.0 <= blob_scores["aji"] < 1.0, blob_scores
+    assert blob_scores["pq"] == 0.0, blob_scores
+    assert score_instances(gt, np.zeros_like(gt))["aji"] == 0.0
     print("metrics self-check ok", out)
 
 
