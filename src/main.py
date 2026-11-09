@@ -24,6 +24,8 @@ def parse_args():
                         help="Path to save outputs (logs, checkpoints, metrics)")
     parser.add_argument("--epochs", type=int, default=Config.STAGE_EPOCH,
                         help="Epochs per stage. Pretrain and finetune each run this many")
+    parser.add_argument("--batch_size", type=int, default=Config.BATCH_SIZE,
+                        help="Samples per batch for train, validation, and test loaders")
     parser.add_argument("--post_process", action=argparse.BooleanOptionalAction, default=Config.POST_PROCESS,
                         help="Score with the HoVer watershed. --no-post-process scores the raw NC argmax")
     return parser.parse_args()
@@ -37,6 +39,7 @@ if __name__ == "__main__":
     Config.NUM_CLASSES = args.num_classes
     Config.DATA_PATH = args.data_path
     Config.OUTPUT_PATH = args.output_path
+    Config.BATCH_SIZE = args.batch_size
     Config.POST_PROCESS = args.post_process
 
     # Ensure output path exists
