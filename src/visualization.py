@@ -84,9 +84,9 @@ def plot_validation_samples(model, dataloader, device, num_classes=6, num_sample
             axes[1].set_title("Ground Truth")
             axes[1].axis('off')
 
-            # Raw NC argmax, before the watershed splits touching nuclei.
+            # Raw NC argmax, before post-processing splits touching nuclei.
             axes[2].imshow(nc_pred[i].cpu().numpy(), cmap="jet")
-            axes[2].set_title("Without watershed")
+            axes[2].set_title("Without post-processing")
             axes[2].axis('off')
 
             axes[3].imshow(np_pred[i].cpu().numpy(), cmap='gray')
@@ -103,13 +103,13 @@ def plot_validation_samples(model, dataloader, device, num_classes=6, num_sample
             axes[5].set_title("HoVer Vertical")
             axes[5].axis('off')
 
-            # Watershed instance ids, then the class written onto each instance.
+            # Post-processed instance ids, then the class written onto each instance.
             axes[6].imshow(pred_inst[i].cpu().numpy(), cmap="jet")
-            axes[6].set_title("With watershed")
+            axes[6].set_title("With post-processing")
             axes[6].axis('off')
 
             axes[7].imshow(pred_type[i].cpu().numpy(), cmap="jet")
-            axes[7].set_title("Watershed types")
+            axes[7].set_title("Post-processed types")
             axes[7].axis('off')
 
             plt.tight_layout()

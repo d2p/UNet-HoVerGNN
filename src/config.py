@@ -8,9 +8,8 @@ class Config:
     NUM_CLASSES = 5
     BATCH_SIZE = 32
     STAGE_EPOCH = 25
-    PATIENCE = 25
     # Centroid match radius at 40x, as in HoVer-Net (12 px). 6 px would be 20x.
     MATCH_RADIUS = 12
-    # Watershed before validation and test scores. The published method uses it.
+    # Post-processing before validation and test scores. The published method uses it.
     # --no-post-process scores the raw NC argmax with pixel IoU and pixel F1.
     POST_PROCESS = True

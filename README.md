@@ -11,9 +11,9 @@
 The first figure is the published UNet-HoVerGNN pipeline. The figure above keeps that shared encoder and the NP, HV, NC, and GC branches, and shows the training and scoring path now in the code.
 
 - **Loss.** NP and NC are cross-entropy plus the HoVer-Net global Dice loss. HV is mean-squared error on the horizontal and vertical maps, plus a weight-2 Sobel gradient term on nuclear pixels only: the x-derivative of the horizontal map and the y-derivative of the vertical map. This is the HoVer-Net map and gradient loss (Graham et al., 2019), in place of the earlier Laplacian penalty on the predicted maps.
-- **Graph.** Finetune places one node at each ground-truth centroid. At validation and test the GNN class of each predicted centroid is painted onto that watershed instance. Encoder features are resized to the input resolution. The default graph loss is cross-entropy plus Dice. `HoverLoss(graph_loss="gc")` adds the original focal term for comparison.
-- **Scores.** Binary Dice of the nuclear head (nucleus versus background) is reported on every split. For that two-class mask, Dice and foreground F1 are the same number. With the watershed on, which is the default, validation also reports AJI (Kumar et al., 2017), panoptic DQ, SQ, and PQ at IoU > 0.5 (Kirillov et al., 2019), and centroid detection F1 at 12 px, the HoVer-Net 40× radius (Graham et al., 2019). Early stopping uses PQ. `--no-post-process` scores the raw NC argmax with pixel IoU and pixel F1, and each saved test figure shows both views.
-- **Ground truth.** `inst.npy` supplies instance ids when it is present, as on MoNuSeg. Otherwise instances are rebuilt from the stored hover maps with the same watershed.
+- **Graph.** Finetune places one node at each ground-truth centroid. At validation and test the GNN class of each predicted centroid is painted onto that post-processed instance. Encoder features are resized to the input resolution. The default graph loss is cross-entropy plus Dice. `HoverLoss(graph_loss="gc")` adds the original focal term for comparison.
+- **Scores.** The comparison columns match the published table. **AJI** is the mean foreground pixel IoU, **F1** is the mean foreground pixel F1, and **PQ** is the mean over classes of `2 * IoU * F1 / (IoU + F1)`. With post-processing on, which is the default, those scores use the instance type map, including GNN labels. `--no-post-process` uses the raw NC argmax. Binary Dice of the nuclear head is reported as well. Each stage runs its full epoch budget, and the saved checkpoint is the best validation PQ. Instance AJI, panoptic DQ/SQ/PQ, and detection F1 are logged separately and do not select the checkpoint.
+- **Ground truth.** `inst.npy` supplies instance ids when it is present, as on MoNuSeg. Otherwise instances are rebuilt from the stored hover maps with the same post-processing.
 
 Graham, S., Vu, Q. D., Raza, S. E. A., Azam, A., Tsang, Y. W., Kwak, J. T., & Rajpoot, N. (2019). Hover-Net: Simultaneous segmentation and classification of nuclei in multi-tissue histology images. *Medical Image Analysis, 58*, 101563. [https://doi.org/10.1016/j.media.2019.101563](https://doi.org/10.1016/j.media.2019.101563)
 
@@ -143,21 +143,21 @@ Useful CLI flags (see `config.py` for defaults):
 | Flag                                   | Meaning                                                                                  |
 | -------------------------------------- | ---------------------------------------------------------------------------------------- |
 | `--epochs N`                           | Epochs per stage (pretrain and finetune each run this many; default 25)                  |
-| `--post_process` / `--no-post-process` | Score with HoVer-Net watershed instances (default), or raw NC argmax with pixel IoU / F1 |
+| `--post_process` / `--no-post-process` | Score with post-processed instances (default), or raw NC argmax with pixel IoU / F1 |
 
 
-Training runs a CNN pretrain stage, then a GNN finetune stage, with early stopping on validation. Checkpoints, CSV metrics, and validation figures are written under `--output_path`.
+Training runs a CNN pretrain stage, then a GNN finetune stage, for the full `--epochs` budget. The checkpoint kept for each stage is the best validation PQ. Checkpoints, CSV metrics, and validation figures are written under `--output_path`.
 
 ### Metrics and post-processing
 
-Validation and test scoring follow HoVer-Net-style instance metrics (`src/metrics.py`):
+The comparison scores in `src/metrics.py` use the same definitions as the published table:
 
-- **Dice** — binary nucleus-versus-background Dice of the NP head. For this two-class mask it equals foreground F1. Pixels are pooled over the split.
-- **AJI** — MoNuSeg / HoVer-Net fast Aggregated Jaccard Index
-- **PQ / DQ / SQ** — panoptic quality with unique IoU > 0.5 matches
-- **Detection F1** — centroid matching at `MATCH_RADIUS` (12 px at 40×)
+- **AJI** — mean foreground pixel IoU of the class map
+- **F1** — mean foreground pixel F1 of the class map
+- **PQ** — mean over foreground classes of the harmonic mean `2 * IoU * F1 / (IoU + F1)`
+- **Dice** — binary nucleus-versus-background Dice of the NP head, pooled over the split
 
-By default, predictions are watershed-separated from the nuclear / hover heads before scoring (`src/postprocess.py`). Use `--no-post-process` to inspect raw class maps without watershed.
+With post-processing on, the class map is the per-instance type label. Instance AJI, panoptic DQ/SQ/PQ at IoU > 0.5, and centroid detection F1 at 12 px are written beside those scores and are not the table columns. Use `--no-post-process` to score the raw NC argmax.
 
 Optional GPU memory probe for tile vs full-image footprints:
 
@@ -192,8 +192,8 @@ python memory_probe.py
 - **MoNuSeg / MoNuSeg_37** — segmentation-only training (`num_classes=2`) with preparation scripts that write the shared tiled `.npy` layout.
 - `prepare_monuseg.py` — downloads official archives and tiles the Kumar train/val/test split (plus MoNuSeg 2018 test).
 - `prepare_monuseg37.py` — converts an `img` / `labelcol` dump into tiled samples; uses XML instances when `data/MoNuSeg/raw` is present.
-- **HoVer-Net metrics** — AJI, PQ/DQ/SQ, and radius-based detection F1 in `metrics.py`.
-- **Watershed post-process** — optional via `--post_process` / `--no-post-process` for validation and final eval.
+- **Comparison metrics** — AJI, F1, and PQ are pixel IoU, pixel F1, and their harmonic mean. Each stage runs every epoch; the saved checkpoint is the best of that PQ.
+- **Post-processing** — optional via `--post_process` / `--no-post-process` for validation and final eval.
 - **Training / eval CLI** — `--epochs`, configurable output path, CSV metrics and sample visualizations.
 - **Instance targets** — `inst.npy` when available; otherwise instances are rebuilt from hover maps for metric computation.
 

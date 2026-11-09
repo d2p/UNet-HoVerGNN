@@ -217,6 +217,57 @@ def score_instances(true_inst, pred_inst):
     return {"aji": aji, "dq": dq, "sq": sq, "pq": pq}
 
 
+class PixelComparisonMeter:
+    """Published comparison scores on a semantic class map.
+
+    AJI here is the mean foreground pixel IoU. F1 is the mean foreground pixel
+    F1. PQ is the mean, over foreground classes, of the harmonic mean
+    2 * IoU * F1 / (IoU + F1). Each class score is averaged over images first.
+    An image where a class is absent from both maps scores 1 for that class.
+    """
+
+    def __init__(self, num_classes):
+        self.num_classes = num_classes
+        self.sum_iou = np.zeros(num_classes, dtype=np.float64)
+        self.sum_f1 = np.zeros(num_classes, dtype=np.float64)
+        self.n = 0
+
+    def update(self, pred, target):
+        pred = np.asarray(pred)
+        target = np.asarray(target)
+        if pred.ndim == 2:
+            pred = pred[None]
+            target = target[None]
+        for image_pred, image_true in zip(pred, target):
+            for class_id in range(self.num_classes):
+                pred_c = image_pred == class_id
+                true_c = image_true == class_id
+                tp = float(np.count_nonzero(pred_c & true_c))
+                fp = float(np.count_nonzero(pred_c & ~true_c))
+                fn = float(np.count_nonzero(~pred_c & true_c))
+                iou_den = tp + fp + fn
+                f1_den = 2.0 * tp + fp + fn
+                self.sum_iou[class_id] += 1.0 if iou_den == 0.0 else tp / iou_den
+                self.sum_f1[class_id] += 1.0 if f1_den == 0.0 else (2.0 * tp) / f1_den
+            self.n += 1
+
+    def compute(self):
+        n = max(self.n, 1)
+        iou_c = self.sum_iou / n
+        f1_c = self.sum_f1 / n
+        pq_c = 2.0 * iou_c * f1_c / (iou_c + f1_c + 1.0e-8)
+        if self.num_classes > 1:
+            iou_c = iou_c[1:]
+            f1_c = f1_c[1:]
+            pq_c = pq_c[1:]
+        return {
+            "aji": float(iou_c.mean()) if len(iou_c) else 0.0,
+            "f1": float(f1_c.mean()) if len(f1_c) else 0.0,
+            "pq": float(pq_c.mean()) if len(pq_c) else 0.0,
+            "f1_per_class": [float(value) for value in f1_c],
+        }
+
+
 class BinaryDiceMeter:
     """Pixel-pooled Dice of nucleus versus background.
 
@@ -348,6 +399,23 @@ def _self_check():
     assert 0.0 < dice.compute() < 1.0, dice.compute()
     empty = BinaryDiceMeter()
     assert empty.compute() == 1.0
+
+    labels = np.zeros((4, 4), np.int32)
+    labels[:2, :] = 1
+    pixel = PixelComparisonMeter(2)
+    pixel.update(labels, labels)
+    perfect_px = pixel.compute()
+    assert abs(perfect_px["aji"] - 1.0) < 1e-6, perfect_px
+    assert abs(perfect_px["f1"] - 1.0) < 1e-6, perfect_px
+    assert abs(perfect_px["pq"] - 1.0) < 1e-6, perfect_px
+    partial_pred = np.zeros_like(labels)
+    partial_pred[:1, :] = 1
+    pixel = PixelComparisonMeter(2)
+    pixel.update(partial_pred, labels)
+    partial = pixel.compute()
+    harmonic = (2.0 * partial["aji"] * partial["f1"]) / (partial["aji"] + partial["f1"])
+    assert abs(partial["aji"] - 0.5) < 1e-6, partial
+    assert abs(partial["pq"] - harmonic) < 1e-6, partial
 
     # A tile with no background pixel used to build a (0, 0) IoU matrix.
     solid = np.ones((8, 8), np.int32)

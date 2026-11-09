@@ -27,7 +27,7 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=Config.BATCH_SIZE,
                         help="Samples per batch for train, validation, and test loaders")
     parser.add_argument("--post_process", action=argparse.BooleanOptionalAction, default=Config.POST_PROCESS,
-                        help="Score with the HoVer watershed. --no-post-process scores the raw NC argmax")
+                        help="Score with post-processing. --no-post-process scores the raw NC argmax")
     return parser.parse_args()
 
 
@@ -69,7 +69,7 @@ if __name__ == "__main__":
 
     # Train model
     train(model, criterion, train_dataloader, val_dataloader, device,
-          num_classes=Config.NUM_CLASSES, epochs=args.epochs, patience=Config.PATIENCE,
+          num_classes=Config.NUM_CLASSES, epochs=args.epochs,
           post_process=Config.POST_PROCESS)
 
     # Evaluate model (pretraining and finetuning)
@@ -78,5 +78,5 @@ if __name__ == "__main__":
     final_evaluate(model, test_dataloader, criterion, device, "finetune",
                    num_classes=Config.NUM_CLASSES, post_process=Config.POST_PROCESS)
 
-    # Each saved figure shows the raw class map and the watershed instance map.
+    # Each saved figure shows the raw class map and the post-processed instance map.
     plot_validation_samples(model, test_dataloader, device, Config.NUM_CLASSES)
