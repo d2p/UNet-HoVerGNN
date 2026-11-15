@@ -173,15 +173,36 @@ class GraphHoverNet(nn.Module):
             return loop_index
         return torch.cat([edge_index, loop_index], dim=1)
 
-    def _encoder_map(self, x):
-        encoder_feats = self.shared_encoder(x)
-        return F.interpolate(
-            encoder_feats[-2], size=x.shape[-2:], mode="bilinear", align_corners=False
-        )
+    def _encoder_feat(self, x):
+        """Second-to-last encoder map at its native resolution."""
+        return self.shared_encoder(x)[-2]
 
-    def _classify_coords(self, encoder_features, node_coords):
-        """Classify one node per coordinate. node_coords is [N, 3] (y, x, batch)."""
-        height, width = encoder_features.shape[-2:]
+    def _bilinear_sample(self, feat_chw, yx, height, width):
+        """Sample one feature map at image pixels of any size.
+
+        height and width are the image size, not the feature-map size. The values
+        match bilinear upsampling to that image (align_corners=False) and then
+        reading integer pixels. Only the requested pixels are materialized.
+        """
+        y = yx[:, 0].float()
+        x = yx[:, 1].float()
+        grid_x = (x + 0.5) / float(width) * 2 - 1
+        grid_y = (y + 0.5) / float(height) * 2 - 1
+        grid = torch.stack([grid_x, grid_y], dim=-1).view(1, 1, -1, 2)
+        sampled = F.grid_sample(
+            feat_chw.unsqueeze(0),
+            grid,
+            mode="bilinear",
+            align_corners=False,
+            padding_mode="border",
+        )
+        return sampled.view(feat_chw.shape[0], -1).t()
+
+    def _classify_coords(self, encoder_features, node_coords, height, width):
+        """Classify one node per coordinate. node_coords is [N, 3] (y, x, batch).
+
+        encoder_features is the native-resolution map. Coordinates are image pixels.
+        """
         chunks = []
         index_chunks = []
         batch_ids = node_coords[:, 2].unique(sorted=True)
@@ -190,14 +211,18 @@ class GraphHoverNet(nn.Module):
             coords = node_coords[index].clone()
             coords[:, 0] = coords[:, 0].clamp(0, height - 1)
             coords[:, 1] = coords[:, 1].clamp(0, width - 1)
-            node_feats = encoder_features[batch_id, :, coords[:, 0], coords[:, 1]].t()
+            node_feats = self._bilinear_sample(
+                encoder_features[batch_id], coords[:, :2], height, width
+            )
             pos_enc = get_sinusoidal_encoding(coords[:, :2], num_freqs=self.pos_freqs)
             node_features = torch.cat([node_feats, pos_enc], dim=1)
             edge_index = self.build_graph(coords[:, :2].float(), node_features)
             mid = ((coords[edge_index[0], :2] + coords[edge_index[1], :2]) / 2).long()
             mid[:, 0] = mid[:, 0].clamp(0, height - 1)
             mid[:, 1] = mid[:, 1].clamp(0, width - 1)
-            edge_attr = encoder_features[batch_id][:, mid[:, 0], mid[:, 1]].t()
+            edge_attr = self._bilinear_sample(
+                encoder_features[batch_id], mid, height, width
+            )
             out_gc, _ = self.graph_branch(node_features, edge_index, edge_attr)
             chunks.append(out_gc)
             index_chunks.append(index)
@@ -211,7 +236,10 @@ class GraphHoverNet(nn.Module):
         """GNN class logits for the given centroids. Does not rerun the CNN heads."""
         if (not self.use_graph) or node_coords is None or node_coords.numel() == 0:
             return node_coords, None
-        return node_coords, self._classify_coords(self._encoder_map(x), node_coords)
+        height, width = x.shape[-2:]
+        return node_coords, self._classify_coords(
+            self._encoder_feat(x), node_coords, height, width
+        )
 
     def forward(self, x, node_coords=None):
         out_np = self.model_np(x)
@@ -219,7 +247,9 @@ class GraphHoverNet(nn.Module):
         out_nc = self.model_nc(x)
         if (not self.use_graph) or node_coords is None or node_coords.numel() == 0:
             return out_np, out_hv, out_nc, None, None
-        out_gc = self._classify_coords(self._encoder_map(x), node_coords)
+        out_gc = self._classify_coords(
+            self._encoder_feat(x), node_coords, x.shape[-2], x.shape[-1]
+        )
         return out_np, out_hv, out_nc, node_coords, out_gc
 
     def print_model_stats(self):
