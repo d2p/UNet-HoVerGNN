@@ -11,6 +11,7 @@ import os
 
 import torch
 
+from config import set_seed
 from loss_function import HoverLoss
 from unet_hovergnn import GraphHoverNet
 
@@ -106,6 +107,7 @@ def _eval_forward(model, batch, size):
 
 
 def measure():
+    set_seed()
     lines = [ESTIMATE, ""]
     if not torch.cuda.is_available():
         lines.append("CUDA is not available. No measurement was taken.")

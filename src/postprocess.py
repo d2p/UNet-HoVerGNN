@@ -199,8 +199,10 @@ def get_node_labels_from_coords(centroid_coords, type_maps):
     return type_maps[b, y, x]
 
 if __name__ == "__main__":
-    from config import Config
+    from config import Config, loader_seed, set_seed
     from unet_hovergnn import GraphHoverNet
+
+    set_seed()
     from loss_function import HoverLoss
     from dataset import SegmentationDataset
     from torchvision import transforms
@@ -217,7 +219,11 @@ if __name__ == "__main__":
     dataset_path = os.path.join(Config.DATA_PATH, Config.DATASET)
 
     train_dataset = SegmentationDataset(dataset_path, split="train", transform=transform)
-    train_dataloader = DataLoader(train_dataset, batch_size=Config.BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
+    train_generator, seed_worker = loader_seed()
+    train_dataloader = DataLoader(
+        train_dataset, batch_size=Config.BATCH_SIZE, shuffle=True,
+        num_workers=4, pin_memory=True, generator=train_generator, worker_init_fn=seed_worker,
+    )
 
     # Pretrain keeps the graph off, so this demo scores the CNN heads only.
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

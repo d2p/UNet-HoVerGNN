@@ -4,7 +4,7 @@ import torch
 from torchvision import transforms
 from torch.utils.data import DataLoader
 
-from config import Config
+from config import Config, loader_seed, set_seed
 from dataset import SegmentationDataset
 from loss_function import HoverLoss
 from training_loop import train, final_evaluate
@@ -28,6 +28,8 @@ def parse_args():
                         help="Samples per batch for train, validation, and test loaders")
     parser.add_argument("--post_process", action=argparse.BooleanOptionalAction, default=Config.POST_PROCESS,
                         help="Score with post-processing. --no-post-process scores the raw NC argmax")
+    parser.add_argument("--seed", type=int, default=Config.SEED,
+                        help="Seed for weight init, dropout, and the training shuffle")
     return parser.parse_args()
 
 
@@ -41,6 +43,9 @@ if __name__ == "__main__":
     Config.OUTPUT_PATH = args.output_path
     Config.BATCH_SIZE = args.batch_size
     Config.POST_PROCESS = args.post_process
+    Config.SEED = args.seed
+    set_seed(Config.SEED)
+    print(f"Seed: {Config.SEED}")
 
     # Ensure output path exists
     os.makedirs(Config.OUTPUT_PATH, exist_ok=True)
@@ -58,9 +63,19 @@ if __name__ == "__main__":
     val_dataset = SegmentationDataset(dataset_path, split="val", transform=transform)
     test_dataset = SegmentationDataset(dataset_path, split="test", transform=transform)
 
-    train_dataloader = DataLoader(train_dataset, batch_size=Config.BATCH_SIZE, shuffle=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=Config.BATCH_SIZE, shuffle=False)
-    test_dataloader = DataLoader(test_dataset, batch_size=Config.BATCH_SIZE, shuffle=False)
+    train_generator, seed_worker = loader_seed(Config.SEED)
+    train_dataloader = DataLoader(
+        train_dataset, batch_size=Config.BATCH_SIZE, shuffle=True,
+        generator=train_generator, worker_init_fn=seed_worker,
+    )
+    val_dataloader = DataLoader(
+        val_dataset, batch_size=Config.BATCH_SIZE, shuffle=False,
+        worker_init_fn=seed_worker,
+    )
+    test_dataloader = DataLoader(
+        test_dataset, batch_size=Config.BATCH_SIZE, shuffle=False,
+        worker_init_fn=seed_worker,
+    )
 
     # === Model, Loss, and Training ===
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

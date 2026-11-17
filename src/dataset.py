@@ -50,8 +50,10 @@ class SegmentationDataset(Dataset):
                 torch.from_numpy(inst).long()
     
 if __name__ == "__main__":
-    from config import Config
+    from config import Config, loader_seed, set_seed
     from torchvision import transforms
+
+    set_seed()
 
     transform = transforms.Compose([
         transforms.ToTensor(),  # Converts HWC to CHW and scales to [0, 1]
@@ -66,9 +68,19 @@ if __name__ == "__main__":
 
     from torch.utils.data import Dataset, DataLoader
 
-    train_dataloader = DataLoader(train_dataset, batch_size=Config.BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=Config.BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
-    test_dataloader = DataLoader(test_dataset, batch_size=Config.BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
+    train_generator, seed_worker = loader_seed()
+    train_dataloader = DataLoader(
+        train_dataset, batch_size=Config.BATCH_SIZE, shuffle=True,
+        num_workers=4, pin_memory=True, generator=train_generator, worker_init_fn=seed_worker,
+    )
+    val_dataloader = DataLoader(
+        val_dataset, batch_size=Config.BATCH_SIZE, shuffle=False,
+        num_workers=4, pin_memory=True, worker_init_fn=seed_worker,
+    )
+    test_dataloader = DataLoader(
+        test_dataset, batch_size=Config.BATCH_SIZE, shuffle=False,
+        num_workers=4, pin_memory=True, worker_init_fn=seed_worker,
+    )
 
     print("First fold:", len(train_dataloader))
     print("Second fold:", len(val_dataloader))

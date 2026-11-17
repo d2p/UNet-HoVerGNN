@@ -268,9 +268,10 @@ class GraphHoverNet(nn.Module):
         print(f"Graph branch parameters: {count_params(self.graph_branch):,}")
 
 if __name__ == "__main__":
-    from config import Config
+    from config import Config, set_seed
     from loss_function import HoverLoss
 
+    set_seed()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = GraphHoverNet(num_classes=Config.NUM_CLASSES)
     model = model.to(device)
