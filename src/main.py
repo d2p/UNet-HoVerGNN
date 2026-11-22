@@ -28,6 +28,9 @@ def parse_args():
                         help="Samples per batch for train, validation, and test loaders")
     parser.add_argument("--post_process", action=argparse.BooleanOptionalAction, default=Config.POST_PROCESS,
                         help="Score with post-processing. --no-post-process scores the raw NC argmax")
+    parser.add_argument("--checkpoint", choices=("dice", "pq"), default=Config.CHECKPOINT_METRIC,
+                        help="Validation score that selects the checkpoint. "
+                             "dice is the binary NP Dice (default); pq is the pixel harmonic mean")
     parser.add_argument("--seed", type=int, default=Config.SEED,
                         help="Seed for weight init, dropout, and the training shuffle")
     return parser.parse_args()
@@ -43,9 +46,11 @@ if __name__ == "__main__":
     Config.OUTPUT_PATH = args.output_path
     Config.BATCH_SIZE = args.batch_size
     Config.POST_PROCESS = args.post_process
+    Config.CHECKPOINT_METRIC = args.checkpoint
     Config.SEED = args.seed
     set_seed(Config.SEED)
     print(f"Seed: {Config.SEED}")
+    print(f"Checkpoint score: {Config.CHECKPOINT_METRIC}")
 
     # Ensure output path exists
     os.makedirs(Config.OUTPUT_PATH, exist_ok=True)
@@ -85,7 +90,8 @@ if __name__ == "__main__":
     # Train model
     train(model, criterion, train_dataloader, val_dataloader, device,
           num_classes=Config.NUM_CLASSES, epochs=args.epochs,
-          post_process=Config.POST_PROCESS)
+          post_process=Config.POST_PROCESS,
+          checkpoint_metric=Config.CHECKPOINT_METRIC)
 
     # Evaluate model (pretraining and finetuning)
     final_evaluate(model, test_dataloader, criterion, device, "pretrain",

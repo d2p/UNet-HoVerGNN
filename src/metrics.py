@@ -273,7 +273,8 @@ class BinaryDiceMeter:
 
     For a binary mask this is the same quantity as the foreground F1:
     2 TP / (2 TP + FP + FN), summed over every pixel in the split.
-    An empty prediction against an empty target scores 1.
+    Both masks empty scores 1. One mask empty and the other not scores 0.
+    A non-finite count scores 0, so an empty head cannot produce NaN.
     """
 
     def __init__(self):
@@ -289,10 +290,19 @@ class BinaryDiceMeter:
         self.fn += float(np.count_nonzero(~pred_fg & true_fg))
 
     def compute(self):
-        denom = 2.0 * self.tp + self.fp + self.fn
-        if denom == 0.0:
+        predicted = self.tp + self.fp
+        target = self.tp + self.fn
+        if not np.isfinite(predicted) or not np.isfinite(target) or not np.isfinite(self.tp):
+            return 0.0
+        # Both empty is a perfect match. One empty side has no overlap.
+        if predicted == 0.0 and target == 0.0:
             return 1.0
-        return float(2.0 * self.tp / denom)
+        if predicted == 0.0 or target == 0.0:
+            return 0.0
+        score = 2.0 * self.tp / (predicted + target)
+        if not np.isfinite(score):
+            return 0.0
+        return float(score)
 
 
 class HoverNetMetrics:
@@ -399,6 +409,16 @@ def _self_check():
     assert 0.0 < dice.compute() < 1.0, dice.compute()
     empty = BinaryDiceMeter()
     assert empty.compute() == 1.0
+    blank = np.zeros_like(inst, dtype=bool)
+    missed = BinaryDiceMeter()
+    missed.update(blank, inst > 0)
+    assert missed.compute() == 0.0
+    false = BinaryDiceMeter()
+    false.update(inst > 0, blank)
+    assert false.compute() == 0.0
+    broken = BinaryDiceMeter()
+    broken.tp = np.nan
+    assert broken.compute() == 0.0
 
     labels = np.zeros((4, 4), np.int32)
     labels[:2, :] = 1

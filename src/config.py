@@ -13,6 +13,9 @@ class Config:
     # Post-processing before validation and test scores. The published method uses it.
     # --no-post-process scores the raw NC argmax with pixel IoU and pixel F1.
     POST_PROCESS = True
+    # Score that selects the checkpoint. "dice" is the binary NP Dice.
+    # "pq" is the pixel harmonic mean of IoU and F1. Override with --checkpoint.
+    CHECKPOINT_METRIC = "dice"
     # Weight init, dropout, and the training-loader shuffle. Override with --seed.
     SEED = 42
 

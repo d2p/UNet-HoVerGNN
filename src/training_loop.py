@@ -179,13 +179,18 @@ def validate(model, dataloader, criterion, device, num_classes=5, post_process=T
 
 
 def train(model, criterion, train_loader, val_loader, device,
-          epochs=20, lr=1e-4, num_classes=5, post_process=True):
+          epochs=20, lr=1e-4, num_classes=5, post_process=True,
+          checkpoint_metric="dice"):
     """Train pretrain then finetune for the full epoch budget.
 
-    The saved checkpoint is the best validation PQ, the harmonic mean of
-    pixel IoU and pixel F1. Training does not stop early: stopping on the
-    instance score was cutting off later segmentation gains.
+    The saved checkpoint is the best validation score named by
+    checkpoint_metric. "dice" is the pooled binary Dice of the NP head.
+    "pq" is the pixel harmonic mean of IoU and F1. Training does not stop
+    early: stopping on the instance score was cutting off later segmentation gains.
     """
+    if checkpoint_metric not in ("dice", "pq"):
+        raise ValueError("checkpoint_metric must be 'dice' or 'pq'")
+    checkpoint_label = "Dice" if checkpoint_metric == "dice" else "PQ"
 
     def train_loop(stage_name, use_graph, start_epoch=1, lr=lr):
         nonlocal best_val_score
@@ -235,11 +240,13 @@ def train(model, criterion, train_loader, val_loader, device,
                     f"F1_d: {val_scores['f1_d']:.4f}"
                 )
 
-            if val_scores["pq"] > best_val_score:
-                best_val_score = val_scores["pq"]
+            # A NaN score must not replace a finite checkpoint.
+            score = val_scores[checkpoint_metric]
+            if score == score and score > best_val_score:
+                best_val_score = score
                 best_model_path = os.path.join(Config.OUTPUT_PATH, f"best_hovernet_{stage_name}.pt")
                 torch.save(model.state_dict(), best_model_path)
-                print(f"Saved best model (based on PQ) to {best_model_path}.")
+                print(f"Saved best model ({checkpoint_label} {score:.4f}) to {best_model_path}.")
 
         return current_epoch + 1
 
@@ -252,7 +259,7 @@ def train(model, criterion, train_loader, val_loader, device,
     next_epoch = train_loop(stage_name="pretrain", use_graph=False, start_epoch=1)
     next_epoch = train_loop(stage_name="finetune", use_graph=True, start_epoch=next_epoch, lr=1e-2)
 
-    print(f"\nTraining complete. Best Val PQ: {best_val_score:.4f}")
+    print(f"\nTraining complete. Best Val {checkpoint_label}: {best_val_score:.4f}")
 
     os.makedirs(Config.OUTPUT_PATH, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
