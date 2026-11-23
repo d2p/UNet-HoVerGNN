@@ -83,7 +83,7 @@ def train_one_epoch(model, dataloader, optimizer, criterion, device, scaler):
 
 
 @torch.no_grad()
-def validate(model, dataloader, criterion, device, num_classes=5, post_process=True):
+def validate(model, dataloader, criterion, device, num_classes=5, post_process=True, sobel_ksize=3):
     """Score one split.
 
     Comparison AJI, F1, and PQ are pixel scores on the semantic class map.
@@ -131,7 +131,8 @@ def validate(model, dataloader, criterion, device, num_classes=5, post_process=T
         if post_process:
             # Instance ids from post-processing. GNN classes replace the NC vote per instance.
             pred_inst, pred_type = postprocess_hovernet_output(
-                np_logits, hv_logits, nc_logits, device, nr_types=num_classes
+                np_logits, hv_logits, nc_logits, device, nr_types=num_classes,
+                sobel_ksize=sobel_ksize,
             )
             if model.use_graph:
                 pred_coords, pred_ids = centroids_from_instances(pred_inst)
@@ -180,7 +181,7 @@ def validate(model, dataloader, criterion, device, num_classes=5, post_process=T
 
 def train(model, criterion, train_loader, val_loader, device,
           epochs=20, lr=1e-4, num_classes=5, post_process=True,
-          checkpoint_metric="dice"):
+          checkpoint_metric="dice", sobel_ksize=3):
     """Train pretrain then finetune for the full epoch budget.
 
     The saved checkpoint is the best validation score named by
@@ -210,7 +211,8 @@ def train(model, criterion, train_loader, val_loader, device,
                 model, train_loader, optimizer, criterion, device, scaler
             )
             val_scores = validate(
-                model, val_loader, criterion, device, num_classes, post_process=post_process
+                model, val_loader, criterion, device, num_classes, post_process=post_process,
+                sobel_ksize=sobel_ksize,
             )
 
             train_losses.append(train_loss)
@@ -326,14 +328,15 @@ def train(model, criterion, train_loader, val_loader, device,
 
 
 @torch.no_grad()
-def final_evaluate(model, test_loader, criterion, device, stage_name, num_classes=6, post_process=True):
+def final_evaluate(model, test_loader, criterion, device, stage_name, num_classes=6, post_process=True, sobel_ksize=3):
     os.makedirs(Config.OUTPUT_PATH, exist_ok=True)
     model_path = os.path.join(Config.OUTPUT_PATH, f"best_hovernet_{stage_name}.pt")
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.set_stage(stage_name)
 
     scores = validate(
-        model, test_loader, criterion, device, num_classes, post_process=post_process
+        model, test_loader, criterion, device, num_classes, post_process=post_process,
+        sobel_ksize=sobel_ksize,
     )
     print(
         f"\nFinal Test [{stage_name}] | Loss: {scores['loss']:.4f} | "

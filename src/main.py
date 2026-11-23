@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader
 from config import Config, loader_seed, set_seed
 from dataset import SegmentationDataset
 from loss_function import HoverLoss
+from postprocess import require_sobel_ksize
 from training_loop import train, final_evaluate
 from unet_hovergnn import GraphHoverNet
 from visualization import plot_validation_samples
@@ -31,6 +32,9 @@ def parse_args():
     parser.add_argument("--checkpoint", choices=("dice", "pq"), default=Config.CHECKPOINT_METRIC,
                         help="Validation score that selects the checkpoint. "
                              "dice is the binary NP Dice (default); pq is the pixel harmonic mean")
+    parser.add_argument("--watershed_sobel", type=require_sobel_ksize, default=Config.WATERSHED_SOBEL,
+                        help="Sobel width for the watershed ridges. Odd integer from 1 to 31, default 3. "
+                             "The hover loss stays 3x3")
     parser.add_argument("--seed", type=int, default=Config.SEED,
                         help="Seed for weight init, dropout, and the training shuffle")
     return parser.parse_args()
@@ -47,10 +51,12 @@ if __name__ == "__main__":
     Config.BATCH_SIZE = args.batch_size
     Config.POST_PROCESS = args.post_process
     Config.CHECKPOINT_METRIC = args.checkpoint
+    Config.WATERSHED_SOBEL = args.watershed_sobel
     Config.SEED = args.seed
     set_seed(Config.SEED)
     print(f"Seed: {Config.SEED}")
     print(f"Checkpoint score: {Config.CHECKPOINT_METRIC}")
+    print(f"Watershed Sobel: {Config.WATERSHED_SOBEL}")
 
     # Ensure output path exists
     os.makedirs(Config.OUTPUT_PATH, exist_ok=True)
@@ -91,13 +97,17 @@ if __name__ == "__main__":
     train(model, criterion, train_dataloader, val_dataloader, device,
           num_classes=Config.NUM_CLASSES, epochs=args.epochs,
           post_process=Config.POST_PROCESS,
-          checkpoint_metric=Config.CHECKPOINT_METRIC)
+          checkpoint_metric=Config.CHECKPOINT_METRIC,
+          sobel_ksize=Config.WATERSHED_SOBEL)
 
     # Evaluate model (pretraining and finetuning)
     final_evaluate(model, test_dataloader, criterion, device, "pretrain",
-                   num_classes=Config.NUM_CLASSES, post_process=Config.POST_PROCESS)
+                   num_classes=Config.NUM_CLASSES, post_process=Config.POST_PROCESS,
+                   sobel_ksize=Config.WATERSHED_SOBEL)
     final_evaluate(model, test_dataloader, criterion, device, "finetune",
-                   num_classes=Config.NUM_CLASSES, post_process=Config.POST_PROCESS)
+                   num_classes=Config.NUM_CLASSES, post_process=Config.POST_PROCESS,
+                   sobel_ksize=Config.WATERSHED_SOBEL)
 
     # Each saved figure shows the raw class map and the post-processed instance map.
-    plot_validation_samples(model, test_dataloader, device, Config.NUM_CLASSES)
+    plot_validation_samples(model, test_dataloader, device, Config.NUM_CLASSES,
+                            sobel_ksize=Config.WATERSHED_SOBEL)

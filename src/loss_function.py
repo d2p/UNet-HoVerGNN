@@ -97,9 +97,9 @@ def _masked_mse(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) ->
 class _HVBranchLoss(nn.Module):
     """HoVer-Net horizontal/vertical loss: map MSE (weight 1) + gradient MSE (weight 2).
 
-    The gradient term is the Sobel x-derivative of the horizontal map and the
-    Sobel y-derivative of the vertical map, compared with the ground truth on
-    nuclear pixels only.
+    The gradient term is the fixed 3x3 Sobel x-derivative of the horizontal map and
+    the 3x3 Sobel y-derivative of the vertical map, compared with the ground truth
+    on nuclear pixels only. ``--watershed_sobel`` does not change this kernel.
     """
 
     def forward(self, logits, h_grads, v_grads, nuclear_mask):

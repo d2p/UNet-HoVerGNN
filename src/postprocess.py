@@ -5,11 +5,24 @@ from skimage.segmentation import watershed
 from skimage.feature import peak_local_max
 from scipy import ndimage as ndi
 
-def _watershed_instances(np_mask, h_map, v_map, class_map):
+def require_sobel_ksize(ksize):
+    """Odd Sobel width OpenCV accepts. The default watershed width is 3."""
+    try:
+        ksize = int(ksize)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"watershed Sobel size must be an odd integer from 1 to 31, got {ksize!r}") from exc
+    if ksize < 1 or ksize > 31 or ksize % 2 == 0:
+        raise ValueError(f"watershed Sobel size must be an odd integer from 1 to 31, got {ksize}")
+    return ksize
+
+
+def _watershed_instances(np_mask, h_map, v_map, class_map, ksize=3):
     """Marker-controlled watershed on HoVer maps.
 
     Returns an instance-id map and a type map (majority class inside each instance).
+    ``ksize`` is the Sobel width of the hover ridges. The loss keeps its own 3x3 kernel.
     """
+    ksize = require_sobel_ksize(ksize)
     # Cast the nuclear mask, hover maps, and class map to the dtypes watershed expects.
     np_mask = np.asarray(np_mask).astype(bool)
     h_map = np.asarray(h_map, dtype=np.float64)
@@ -18,8 +31,8 @@ def _watershed_instances(np_mask, h_map, v_map, class_map):
 
     # Sobel energy is high where the hover maps jump. Invert it so watershed
     # treats those jumps as ridges and floods outward from each marker.
-    dx = cv2.Sobel(h_map, cv2.CV_64F, 1, 0, ksize=3)
-    dy = cv2.Sobel(v_map, cv2.CV_64F, 0, 1, ksize=3)
+    dx = cv2.Sobel(h_map, cv2.CV_64F, 1, 0, ksize=ksize)
+    dy = cv2.Sobel(v_map, cv2.CV_64F, 0, 1, ksize=ksize)
     energy = np.sqrt(dx ** 2 + dy ** 2)
     energy = (energy - energy.min()) / (energy.max() - energy.min() + 1e-8)
     energy = 1.0 - energy
@@ -44,7 +57,7 @@ def _watershed_instances(np_mask, h_map, v_map, class_map):
     return instance_map, type_map
 
 
-def postprocess_hovernet_output(np_logits, hv_logits, nc_logits, device, return_centroids=False, nr_types=6):
+def postprocess_hovernet_output(np_logits, hv_logits, nc_logits, device, return_centroids=False, nr_types=6, sobel_ksize=3):
     """Split nuclei with the HoVer watershed.
 
     Returns:
@@ -68,7 +81,7 @@ def postprocess_hovernet_output(np_logits, hv_logits, nc_logits, device, return_
             class_map = nc_pred[i].detach().cpu().numpy()
         else:
             class_map = np.zeros(np_mask.shape, dtype=np.int32)
-        inst, typ = _watershed_instances(np_mask, h_map, v_map, class_map)
+        inst, typ = _watershed_instances(np_mask, h_map, v_map, class_map, ksize=sobel_ksize)
         instances.append(torch.from_numpy(inst).long())
         types.append(torch.from_numpy(typ).long())
 
@@ -78,9 +91,8 @@ def postprocess_hovernet_output(np_logits, hv_logits, nc_logits, device, return_
 def instances_from_hover(mask, h_map, v_map):
     """Recover a ground-truth instance map from a class mask and hover maps.
 
-    Kaggle samples store class ids, not instance ids. The same watershed used
-    at inference is run on the stored ground-truth hover maps. Touching nuclei
-    of the same class are separated only as well as those maps allow.
+    Kaggle samples store class ids, not instance ids. The watershed uses the
+    fixed 3x3 Sobel. ``--watershed_sobel`` applies only to predicted maps.
     """
     # Watershed runs in NumPy. Remember the device so the ids can be moved back.
     if torch.is_tensor(mask):
@@ -93,8 +105,8 @@ def instances_from_hover(mask, h_map, v_map):
         mask_np = np.asarray(mask)
         h_np = np.asarray(h_map)
         v_np = np.asarray(v_map)
-    # Seed the same watershed used at inference. The class map is the GT type labels.
-    inst, _ = _watershed_instances(mask_np > 0, h_np, v_np, mask_np)
+    # Ground-truth rebuild stays on the 3x3 Sobel. The custom width is for predictions only.
+    inst, _ = _watershed_instances(mask_np > 0, h_np, v_np, mask_np, ksize=3)
     inst_t = torch.from_numpy(inst).long()
     if device is not None:
         inst_t = inst_t.to(device)

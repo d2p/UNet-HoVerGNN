@@ -16,6 +16,9 @@ class Config:
     # Score that selects the checkpoint. "dice" is the binary NP Dice.
     # "pq" is the pixel harmonic mean of IoU and F1. Override with --checkpoint.
     CHECKPOINT_METRIC = "dice"
+    # Sobel width for the watershed ridges only. The hover loss stays 3x3.
+    # Odd integer from 1 to 31. Override with --watershed_sobel.
+    WATERSHED_SOBEL = 3
     # Weight init, dropout, and the training-loader shuffle. Override with --seed.
     SEED = 42
 

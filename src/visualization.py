@@ -41,7 +41,7 @@ def visualize_hovernet_output(pred_inst, filename=None):
     print(f"Saved HoverNet visualization to: {output_file}")
 
 @torch.no_grad()
-def plot_validation_samples(model, dataloader, device, num_classes=6, num_samples=10):
+def plot_validation_samples(model, dataloader, device, num_classes=6, num_samples=10, sobel_ksize=3):
     model.eval()
     samples_shown = 0
 
@@ -60,7 +60,8 @@ def plot_validation_samples(model, dataloader, device, num_classes=6, num_sample
         nc_pred = torch.argmax(nc_logits, dim=1)
 
         pred_inst, pred_type = postprocess_hovernet_output(
-            np_logits, hv_logits, nc_logits, device, nr_types=num_classes
+            np_logits, hv_logits, nc_logits, device, nr_types=num_classes,
+            sobel_ksize=sobel_ksize,
         )
         if model.use_graph:
             pred_coords, pred_ids = centroids_from_instances(pred_inst)
